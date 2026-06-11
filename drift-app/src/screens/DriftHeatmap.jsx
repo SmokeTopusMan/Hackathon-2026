@@ -64,18 +64,24 @@ function MapClickHandler({ onMapClick }) {
 
 export default function DriftHeatmap() {
   const navigate = useNavigate();
-  const { incidentData } = useIncident();
+  const { incidentData, driftData, setDriftData, setCurrentHour } = useIncident();
 
-  // Real simulation output (public/drift_data.json), produced by sim_drowned_body.py
-  const [driftData, setDriftData] = useState(null);
   const [loadError, setLoadError] = useState(null);
 
+  // Prefer the live result from the run we just triggered (context). If we
+  // landed here without a run, pull the latest from the API, then fall back to
+  // the static file so the screen still works with no backend.
   React.useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}drift_data.json`)
+    if (driftData) return;
+    fetch(`/api/drift_data?t=${Date.now()}`)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(setDriftData)
-      .catch((e) => setLoadError(e.message));
-  }, []);
+      .catch(() =>
+        fetch(`${import.meta.env.BASE_URL}drift_data.json`)
+          .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+          .then(setDriftData)
+          .catch((e) => setLoadError(e.message)));
+  }, [driftData, setDriftData]);
 
   const frames = driftData?.frames ?? [];
   const maxHour = frames.length ? frames.length - 1 : 72;
@@ -88,6 +94,11 @@ export default function DriftHeatmap() {
   React.useEffect(() => {
     if (timeOffset > maxHour) setTimeOffset(maxHour);
   }, [maxHour]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // publish the hour shown here so the Search Plan screen plans for THIS time
+  React.useEffect(() => {
+    setCurrentHour(timeOffset);
+  }, [timeOffset, setCurrentHour]);
 
   const frame = frames[timeOffset] ?? null;
 

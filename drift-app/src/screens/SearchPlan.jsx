@@ -1,176 +1,170 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useIncident } from '../context/IncidentContext';
-import { MapContainer, TileLayer, Marker, Polyline, Tooltip, Circle, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, Tooltip, CircleMarker, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet.heat';
 
-// Reusing same icon for LSP
 const lspIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41]
+  iconSize: [25, 41], iconAnchor: [12, 41]
 });
-
-// Generate mock team path
-const generateMockPath = (startPos, teamIndex) => {
-  const path = [];
-  const [lat, lng] = startPos;
-  let curLat = lat;
-  let curLng = lng;
-  
-  // Base offset depending on team
-  const latOffsetDir = teamIndex === 0 ? 1 : teamIndex === 1 ? -1 : 0;
-  const lngOffsetDir = teamIndex === 2 ? 1 : teamIndex === 0 ? 0.5 : -0.5;
-
-  for(let i=0; i<6; i++) {
-    curLat += (Math.random() * 0.01 + 0.005) * latOffsetDir;
-    curLng += (Math.random() * 0.01 + 0.005) * lngOffsetDir;
-    path.push([curLat, curLng]);
-  }
-  return path;
-};
 
 function HeatmapLayer({ points }) {
   const map = useMap();
   React.useEffect(() => {
     if (!points || points.length === 0) return;
     const heat = L.heatLayer(points, {
-      radius: 18,
-      blur: 18,
-      maxZoom: 13,
+      radius: 18, blur: 18, maxZoom: 13,
       gradient: { 0.2: 'blue', 0.4: 'lime', 0.6: 'orange', 1.0: 'red' }
     }).addTo(map);
-    return () => {
-      map.removeLayer(heat);
-    };
+    return () => map.removeLayer(heat);
   }, [map, points]);
   return null;
 }
 
-function generateHeatmapPoints(timeOffset) {
-  const points = [];
-  const count = 1500;
-  const cLat = 32.85 + (timeOffset * 0.0003);
-  const cLng = 34.95 + (timeOffset * 0.0001);
-  const spread = 0.01 + (timeOffset * 0.0005);
-  
-  for(let i=0; i<count; i++) {
-    const u1 = Math.random() || 0.001;
-    const u2 = Math.random() || 0.001;
-    const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-    const z1 = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
-    
-    const intensity = Math.random() * 0.8 + 0.2;
-    
-    points.push([
-      cLat + z0 * spread,
-      cLng + z1 * spread,
-      intensity
-    ]);
+// great-circle length of a poly-path, km
+function pathKm(waypoints) {
+  const R = 6371;
+  let km = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    const [la1, lo1] = waypoints[i - 1];
+    const [la2, lo2] = waypoints[i];
+    const dLa = (la2 - la1) * Math.PI / 180, dLo = (lo2 - lo1) * Math.PI / 180;
+    const a = Math.sin(dLa / 2) ** 2 +
+      Math.cos(la1 * Math.PI / 180) * Math.cos(la2 * Math.PI / 180) * Math.sin(dLo / 2) ** 2;
+    km += 2 * R * Math.asin(Math.sqrt(a));
   }
-  return points;
+  return km;
 }
 
-const TEAM_COLORS = ['#3b82f6', '#f97316', '#22c55e', '#a855f7', '#ec4899']; // blue, orange, green, purple, pink
+// drop consecutive duplicate waypoints (an agent that "stays" repeats a cell)
+function dedupe(waypoints) {
+  return waypoints.filter((p, i) => i === 0 ||
+    p[0] !== waypoints[i - 1][0] || p[1] !== waypoints[i - 1][1]);
+}
 
 export default function SearchPlan() {
   const navigate = useNavigate();
-  const { incidentData } = useIncident();
-  
-  const [config, setConfig] = useState({
-    teams: 3,
-    radius: 50,
-    duration: 2,
-    strategy: 'coverage'
-  });
+  const { incidentData, driftData, setDriftData, currentHour, setCurrentHour, fetchPlanForHour } = useIncident();
 
-  const [isComputing, setIsComputing] = useState(false);
-  const [planGenerated, setPlanGenerated] = useState(false);
-  const [teamPaths, setTeamPaths] = useState([]);
-  
-  const mapCenter = (incidentData.lat && incidentData.lng) 
-    ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)] 
-    : [32.82, 34.99];
+  // make sure we have sim output (in case the user deep-linked here)
+  useEffect(() => {
+    if (driftData) return;
+    fetch(`/api/drift_data?t=${Date.now()}`)
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(setDriftData)
+      .catch(() => fetch(`${import.meta.env.BASE_URL}drift_data.json`)
+        .then((r) => r.ok ? r.json() : null).then((d) => d && setDriftData(d)));
+  }, [driftData, setDriftData]);
 
-  // We use a fixed timeOffset of 12h for the search plan heatmap preview
-  const heatmapPoints = React.useMemo(() => generateHeatmapPoints(12), []);
+  const frames = driftData?.frames ?? [];
+  const maxHour = frames.length ? frames.length - 1 : 72;
 
-  const handleGenerate = () => {
-    setIsComputing(true);
-    setPlanGenerated(false);
-    
-    setTimeout(() => {
-      // generate mock paths
-      const paths = [];
-      for(let i=0; i<config.teams; i++) {
-        paths.push(generateMockPath(mapCenter, i));
-      }
-      setTeamPaths(paths);
-      setIsComputing(false);
-      setPlanGenerated(true);
-    }, 2000);
-  };
+  // the plan is (re)computed for the hour currently shown on the heatmap
+  const [plan, setPlan] = useState(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPlanLoading(true);
+    setPlanError(null);
+    fetchPlanForHour(currentHour)
+      .then((p) => { if (!cancelled) setPlan(p); })
+      .catch((e) => {
+        if (cancelled) return;
+        // no backend -> fall back to the plan embedded in the sim output
+        if (driftData?.search_plan) setPlan(driftData.search_plan);
+        else setPlanError(e.message);
+      })
+      .finally(() => { if (!cancelled) setPlanLoading(false); });
+    return () => { cancelled = true; };
+  }, [currentHour, fetchPlanForHour, driftData]);
+
+  const mapCenter = (incidentData.lat && incidentData.lng)
+    ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
+    : driftData?.lkp ? [driftData.lkp.lat, driftData.lkp.lon] : [32.82, 34.99];
+
+  // heatmap underlay = the frame the plan is computed on (current hour)
+  const heatmapPoints = useMemo(() => {
+    if (!frames.length) return [];
+    return frames[Math.min(currentHour, frames.length - 1)]?.points ?? [];
+  }, [frames, currentHour]);
+
+  const teams = plan?.teams ?? [];
+  const totalKm = teams.reduce((s, t) => s + pathKm(t.waypoints), 0);
+
+  // ---- animation: watch the teams sweep out from shore (algorithm running) --
+  const teamTracks = useMemo(() => teams.map((t) => dedupe(t.waypoints)), [teams]);
+  const maxLen = useMemo(
+    () => Math.max(1, ...teamTracks.map((p) => p.length)), [teamTracks]);
+  const [animStep, setAnimStep] = useState(1);
+  const [playing, setPlaying] = useState(true);
+
+  // (re)start the animation whenever a new plan arrives
+  useEffect(() => {
+    if (plan) { setAnimStep(1); setPlaying(true); }
+  }, [plan]);
+
+  // advance one waypoint at a time while playing
+  useEffect(() => {
+    if (!playing) return;
+    if (animStep >= maxLen) { setPlaying(false); return; }
+    const id = setTimeout(() => setAnimStep((s) => Math.min(maxLen, s + 1)), 240);
+    return () => clearTimeout(id);
+  }, [playing, animStep, maxLen]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
-      
+
       {/* Left Sidebar */}
       <div className="w-[400px] bg-white border-r border-[#E2E8F0] flex flex-col shrink-0 overflow-y-auto">
-        
+
         <div className="p-6 border-b border-[#E2E8F0]">
-          <h2 className="text-xl font-bold text-[#0F172A] mb-4">Search Plan Configuration</h2>
-          
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[#0F172A] mb-1">Number of Teams</label>
-              <input type="number" min="1" max="10" value={config.teams} onChange={e => setConfig({...config, teams: parseInt(e.target.value)})} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-            </div>
+          <h2 className="text-xl font-bold text-[#0F172A] mb-1">Search Plan</h2>
+          <p className="text-xs text-[#64748B] mb-4">
+            Coordinated greedy coverage of the drift heatmap. Teams launch from
+            shore and sweep over water only.
+          </p>
 
-            <div>
-              <label className="block text-sm font-medium text-[#0F172A] mb-1" title="The effective detection radius of the sonar equipment">Sonar Radius per team (m) ℹ️</label>
-              <input type="number" value={config.radius} onChange={e => setConfig({...config, radius: parseInt(e.target.value)})} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-[#0F172A] mb-1">Max Duration per team (hours)</label>
-              <input type="number" value={config.duration} onChange={e => setConfig({...config, duration: parseInt(e.target.value)})} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-[#0F172A] mb-2">Search Strategy</label>
-              <div className="space-y-2 text-sm text-[#0F172A]">
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="strategy" value="coverage" checked={config.strategy === 'coverage'} onChange={() => setConfig({...config, strategy: 'coverage'})} className="accent-[#0F766E]" />
-                  Maximize probability coverage
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="strategy" value="systematic" checked={config.strategy === 'systematic'} onChange={() => setConfig({...config, strategy: 'systematic'})} className="accent-[#0F766E]" />
-                  Systematic sweep (Lawnmower)
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="strategy" value="converge" checked={config.strategy === 'converge'} onChange={() => setConfig({...config, strategy: 'converge'})} className="accent-[#0F766E]" />
-                  Converge on peak zone
-                </label>
-              </div>
-            </div>
-
-            <button 
-              onClick={handleGenerate}
-              disabled={isComputing}
-              className={`w-full mt-4 py-3 font-medium transition-colors flex justify-center items-center ${isComputing ? 'bg-[#0F766E]/80 text-white cursor-wait' : 'bg-[#0F766E] text-white hover:bg-[#115E59]'}`}
-            >
-              {isComputing ? 'Computing optimal paths...' : 'Generate Plan'}
-            </button>
+          {/* the plan tracks the heatmap time; adjustable here too */}
+          <div className="mb-2 flex justify-between text-sm font-semibold text-[#0F172A]">
+            <span>Plan for forecast time</span>
+            <span className="text-[#0F766E]">T+{currentHour}h</span>
           </div>
+          <input type="range" min="0" max={maxHour} step="1" value={currentHour}
+            onChange={(e) => setCurrentHour(parseInt(e.target.value))}
+            className="w-full accent-[#0F766E] mb-4" />
+
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between"><span className="text-[#64748B]">Teams</span><span className="font-semibold">{plan ? plan.teams.length : '–'}</span></div>
+            <div className="flex justify-between"><span className="text-[#64748B]">Sonar radius</span><span className="font-semibold">{plan ? `${plan.sonar_radius_m} m` : '–'}</span></div>
+            <div className="flex justify-between"><span className="text-[#64748B]">Planning horizon</span><span className="font-semibold">{plan ? `${plan.horizon} steps` : '–'}</span></div>
+          </div>
+          <p className="text-[11px] text-[#64748B] italic mt-3">
+            Team count / sonar / horizon come from the simulation
+            (<span className="font-mono">sim_drowned_body.py</span> or
+            <span className="font-mono"> incident.json</span>).
+          </p>
+
+          {planLoading && (
+            <div className="mt-4 flex items-center gap-2 text-sm text-[#0F766E]">
+              <span className="inline-block w-4 h-4 border-2 border-[#0F766E] border-t-transparent rounded-full animate-spin"></span>
+              Planning for T+{currentHour}h…
+            </div>
+          )}
+          {planError && (
+            <p className="text-xs text-[#DC2626] mt-3">No plan ({planError}). Run a simulation first.</p>
+          )}
         </div>
 
-        {planGenerated && (
+        {plan && (
           <div className="p-6 bg-[#F8F9FA] flex-1">
             <div className="bg-teal-50 border border-teal-200 p-4 mb-6">
               <p className="text-center font-bold text-teal-900 text-lg">
-                Estimated probability of locating victim: 73%
+                Probability cleared in {plan.horizon} steps: {plan.total_cleared_pct}%
               </p>
             </div>
 
@@ -180,52 +174,51 @@ export default function SearchPlan() {
                 <thead className="bg-gray-50 border-b border-[#E2E8F0]">
                   <tr>
                     <th className="p-2 font-medium text-[#64748B]">Team</th>
-                    <th className="p-2 font-medium text-[#64748B]">Pts</th>
+                    <th className="p-2 font-medium text-[#64748B]">Waypts</th>
                     <th className="p-2 font-medium text-[#64748B]">Dist</th>
-                    <th className="p-2 font-medium text-[#64748B]">Cov</th>
+                    <th className="p-2 font-medium text-[#64748B]">Cleared</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2E8F0]">
-                  {teamPaths.map((_, i) => (
+                  {teams.map((t, i) => (
                     <tr key={i}>
                       <td className="p-2 flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: TEAM_COLORS[i % TEAM_COLORS.length] }}></div>
-                        Team {String.fromCharCode(65 + i)}
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.color }}></div>
+                        Team {t.team}
                       </td>
-                      <td className="p-2">6</td>
-                      <td className="p-2">{(Math.random()*4 + 2).toFixed(1)} km</td>
-                      <td className="p-2">{Math.floor(Math.random()*15 + 10)}%</td>
+                      <td className="p-2">{dedupe(t.waypoints).length}</td>
+                      <td className="p-2">{pathKm(t.waypoints).toFixed(1)} km</td>
+                      <td className="p-2">{t.cleared_pct}%</td>
                     </tr>
                   ))}
                   <tr className="bg-gray-50 font-bold text-[#0F172A]">
                     <td className="p-2">TOTAL</td>
-                    <td className="p-2">{teamPaths.length * 6}</td>
-                    <td className="p-2">~{teamPaths.length * 3} km</td>
-                    <td className="p-2">73%</td>
+                    <td className="p-2">{teams.reduce((s, t) => s + dedupe(t.waypoints).length, 0)}</td>
+                    <td className="p-2">~{totalKm.toFixed(1)} km</td>
+                    <td className="p-2">{plan.total_cleared_pct}%</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
             <div className="border border-[#E2E8F0] bg-white p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-[#64748B]">AI Tactical Summary</span>
-              </div>
-              <p className="text-sm text-[#0F172A] leading-relaxed mb-3">
-                Team A is assigned the high-confidence northern corridor near the LSP. Teams B and C are deployed to cover the eastern dispersion zone. If no contact is made within 45 minutes, recommend Teams B and C converge on Team A's sector. Current model confidence: HIGH.
+              <span className="text-xs font-bold uppercase tracking-wider text-[#64748B]">AI Tactical Summary</span>
+              <p className="text-sm text-[#0F172A] leading-relaxed my-2">
+                {teams.length} teams launch from the nearest shore points and are dispersed by a
+                coordinated greedy planner (sonar {plan.sonar_radius_m} m, {plan.grid_m} m grid) over the
+                T+{plan.plan_hour}h probability field — clearing <b>{plan.total_cleared_pct}%</b> with no
+                overlapping sweeps. Re-plan at a later hour as the body drifts.
               </p>
               <p className="text-[10px] text-[#64748B] italic">
-                Generated by Nahshol AI — based on drift model output and search parameters
+                Generated by core/search_planner.py on the live drift heatmap
               </p>
             </div>
           </div>
         )}
 
-        <div className="p-4 mt-auto border-t border-[#E2E8F0] mt-auto mt-4 flex-shrink-0">
-          <button 
-            onClick={() => navigate('/heatmap')}
-            className="w-full py-3 bg-white border-2 border-[#0F766E] text-[#0F766E] font-medium hover:bg-[#F0FDFA] transition-colors"
-          >
+        <div className="p-4 mt-auto border-t border-[#E2E8F0] flex-shrink-0">
+          <button onClick={() => navigate('/heatmap')}
+            className="w-full py-3 bg-white border-2 border-[#0F766E] text-[#0F766E] font-medium hover:bg-[#F0FDFA] transition-colors">
             ← Switch to Heatmap
           </button>
         </div>
@@ -238,56 +231,69 @@ export default function SearchPlan() {
             attribution='&copy; <a href="https://carto.com/attributions">CARTO</a>'
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
-          
+
           <HeatmapLayer points={heatmapPoints} />
 
-          {/* LSP Marker */}
+          {/* LKP marker = the coordinates entered in the Incident Report */}
           <Marker position={mapCenter} icon={lspIcon}>
-            <Tooltip permanent direction="top" offset={[0, -30]} className="font-bold">LSP</Tooltip>
+            <Tooltip permanent direction="top" offset={[0, -30]} className="font-bold">LKP</Tooltip>
           </Marker>
 
-          {/* Team Paths */}
-          {planGenerated && teamPaths.map((path, i) => {
-            const color = TEAM_COLORS[i % TEAM_COLORS.length];
-            // Combine start point with generated path
-            const fullPath = [mapCenter, ...path];
-            
+          {/* Animated coordinated team paths (shore -> sea): the search
+              algorithm sweeping out, revealed one waypoint per tick. */}
+          {teams.map((t, i) => {
+            const full = teamTracks[i];
+            const shown = full.slice(0, Math.max(1, animStep));   // path so far
+            const head = shown[shown.length - 1];                 // current position
             return (
               <React.Fragment key={`team-${i}`}>
-                <Polyline 
-                  positions={fullPath} 
-                  pathOptions={{ color, weight: 3, dashArray: '8, 8' }} 
-                />
-                {fullPath.map((pt, j) => {
-                  if (j === 0) return null; // Skip LSP
-                  return (
-                    <Circle 
-                      key={`pt-${i}-${j}`}
-                      center={pt} 
-                      radius={40} 
-                      pathOptions={{ color, fillColor: 'white', fillOpacity: 1, weight: 2 }}
-                    >
-                      <Tooltip direction="right" offset={[10, 0]} className="text-xs">
-                        <div className="font-bold">Waypoint {j} — Team {String.fromCharCode(65 + i)}</div>
-                        <div>Est. arrival: T+{j * 15}min</div>
-                        <div>Zone probability: {Math.floor(Math.random() * 30 + 10)}%</div>
-                      </Tooltip>
-                    </Circle>
-                  )
-                })}
+                <Polyline positions={shown} pathOptions={{ color: t.color, weight: 3, opacity: 0.9 }} />
+                {/* shore launch point */}
+                <CircleMarker center={full[0]} radius={7}
+                  pathOptions={{ color: t.color, fillColor: t.color, fillOpacity: 1, weight: 2 }}>
+                  <Tooltip direction="right" offset={[8, 0]} className="text-xs">
+                    <div className="font-bold">Team {t.team} — shore launch</div>
+                  </Tooltip>
+                </CircleMarker>
+                {/* current sonar sweep at the head of the path */}
+                {plan?.sonar_radius_m && (
+                  <Circle center={head} radius={plan.sonar_radius_m}
+                    pathOptions={{ color: t.color, fillColor: t.color, fillOpacity: 0.18, weight: 1 }} />
+                )}
+                <CircleMarker center={head} radius={5}
+                  pathOptions={{ color: t.color, fillColor: 'white', fillOpacity: 1, weight: 2 }}>
+                  <Tooltip direction="right" offset={[8, 0]} className="text-xs">
+                    <div className="font-bold">Team {t.team}</div>
+                    <div>Est. time: T+{(shown.length - 1) * 15}min</div>
+                  </Tooltip>
+                </CircleMarker>
               </React.Fragment>
             );
           })}
         </MapContainer>
 
-        {planGenerated && (
+        {/* animation controls */}
+        {teams.length > 0 && (
+          <div className="absolute top-4 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
+            <button onClick={() => { if (animStep >= maxLen) setAnimStep(1); setPlaying((p) => !p); }}
+              className="px-3 py-1.5 text-sm font-semibold bg-[#0F766E] text-white rounded hover:bg-[#115E59]">
+              {playing ? '❚❚ Pause' : (animStep >= maxLen ? '↻ Replay' : '▶ Play')}
+            </button>
+            <input type="range" min="1" max={maxLen} value={animStep}
+              onChange={(e) => { setPlaying(false); setAnimStep(parseInt(e.target.value)); }}
+              className="accent-[#0F766E] w-40" />
+            <span className="text-xs text-[#64748B] font-medium tabular-nums">step {animStep}/{maxLen}</span>
+          </div>
+        )}
+
+        {teams.length > 0 && (
           <div className="absolute bottom-6 right-6 z-[400] bg-white border border-[#E2E8F0] p-3 shadow-md">
             <h4 className="text-xs font-bold text-[#64748B] uppercase mb-2 tracking-wider">Team Deployment</h4>
             <div className="space-y-1">
-              {teamPaths.map((_, i) => (
+              {teams.map((t, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm font-medium text-[#0F172A]">
-                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: TEAM_COLORS[i % TEAM_COLORS.length] }}></div>
-                  Team {String.fromCharCode(65 + i)}
+                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.color }}></div>
+                  Team {t.team} — {t.cleared_pct}%
                 </div>
               ))}
             </div>

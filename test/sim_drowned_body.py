@@ -14,6 +14,7 @@ Outputs go to ./output/ next to this script.
 """
 
 import os
+import re
 import sys
 import logging
 from datetime import datetime, timedelta
@@ -37,6 +38,7 @@ from opendrift.readers import reader_netCDF_CF_generic
 from core.drowned_drift import (
     DrownedBodyDrift, refloat_time_seconds, drown_delay_seconds, body_dynamics,
     SURFACE_EPS)
+from core.search_planner import Agent, CoveragePlanner
 
 OUTDIR = os.path.join(HERE, 'output')
 os.makedirs(OUTDIR, exist_ok=True)
@@ -51,6 +53,8 @@ LKP_RADIUS_M  = 300                   # position uncertainty of the LKP (m)
 # --- victim (drives sink/refloat timing via body_dynamics) -----------------
 BODY_HEIGHT_M = 1.75                  # victim height (m)
 BODY_WEIGHT_KG = 75.0                 # victim weight (kg)
+WATER_TEMP_C = None                   # sea temp (C) from the form; refloat-timing
+                                      # driver (TODO in body_dynamics), stored now
 
 # --- LKP-time (drowning) uncertainty ---------------------------------------
 # We rarely know the exact moment of drowning: the victim drifts at the
@@ -80,8 +84,9 @@ CMEMS_USER        = 'yairtheop1@gmail.com'
 CMEMS_PASS        = '6dewk7ymVUj*j4h'
 MAX_DEPTH_M       = 200.0   # only fetch currents down to here (Haifa shelf is shallow)
 SUBSET_MARGIN_DEG = 0.8     # half-width of the box around the LKP (~75 km of drift room)
-REFRESH_DATA      = True    # True = re-download the subset each run (latest forecast)
-CURFILE           = os.path.join(OUTDIR, 'haifa_currents.nc')
+REFRESH_DATA      = False   # True = always re-download; False = reuse a cached subset
+                            # with the SAME params (faster, and never overwrites a
+                            # file another run might still hold open on Windows)
 
 # --- stochastic forcing (Gaussian noise) -----------------------------------
 # Real drift is noisier than any gridded current field: sub-grid turbulence,
@@ -120,7 +125,89 @@ HEATMAP_SMOOTH = 0      # gaussian smoothing in cells (0 = crisp grid boxes)
 APP_JSON          = os.path.join(HERE, '..', 'drift-app', 'public', 'drift_data.json')
 APP_MAX_PARTICLES = 1500   # particles per frame in the JSON (keeps the file light)
 
+# --- coordinated search plan (core/search_planner.py) ----------------------
+# After the drift produces a probability heatmap we route a heterogeneous
+# rescue team over it (maximise probability cleared = minimise time-to-detect).
+# The plan is drawn on the heatmap PNG and exported into drift_data.json so the
+# React Search-Plan screen renders the REAL paths instead of mock ones.
+PLAN_HOUR        = 24      # which forecast hour's heatmap to plan the search on
+PLAN_GRID_M      = 200     # planning grid cell size (finer than the display grid)
+PLAN_TEAMS       = 3       # number of rescue teams (agents)
+PLAN_SONAR_M     = 400     # sonar sweep radius per team (m)
+PLAN_SPEED_CELLS = 2       # grid cells a team advances per planning tick
+PLAN_HORIZON     = 30      # number of planning time-steps T
+PLAN_DISPERSION  = 0.4     # 0..1: how strongly teams keep apart to cover more
+                           # ground (0 = pure probability-greedy). ~0.3-0.5 spreads
+                           # the routes without giving up real coverage.
+# team colours match the React SearchPlan TEAM_COLORS palette
+PLAN_COLORS      = ['#3b82f6', '#f97316', '#22c55e', '#a855f7', '#ec4899']
+
+# --- incident input (frontend -> simulation) -------------------------------
+# If this JSON exists it OVERRIDES the LKP / victim / time / team settings
+# above, so the lon-lat (and victim profile) entered in the React Incident
+# Report drive the actual simulation. The Incident Report screen can export it
+# with its "Download incident.json" button; drop it here (or in public/).
+INCIDENT_JSON    = os.path.join(HERE, '..', 'drift-app', 'public', 'incident.json')
+
 rng = np.random.default_rng(42)       # reproducible ensemble
+
+# environment overrides (used by the API / a quick demo without Copernicus):
+#   NAHSHON_SOURCE=offline   -> constant forcing, no download
+#   NAHSHON_PARTICLES=1500   -> smaller, faster ensemble
+if os.environ.get('NAHSHON_SOURCE'):
+    SOURCE = os.environ['NAHSHON_SOURCE']
+if os.environ.get('NAHSHON_PARTICLES'):
+    N_PARTICLES = int(os.environ['NAHSHON_PARTICLES'])
+
+
+def apply_incident(inc):
+    """Override the LKP / victim / search-time / team globals from an incident
+    dict (the React Incident Report form), so the coordinates and victim
+    profile entered in the frontend ARE the inputs of this simulation.
+
+    Recognised keys (all optional): lat, lng/lon, victimHeight (cm),
+    victimWeight (kg), date (YYYY-MM-DD), timeFrom (HH:MM), waterTemp,
+    durationHours, teams, sonarRadius (m), speed (cells/tick), horizon,
+    planHour, nParticles."""
+    if not inc:
+        return
+    global LKP_LAT, LKP_LON, BODY_HEIGHT_M, BODY_WEIGHT_KG, SEARCH_TIME
+    global RUN_DURATION, N_PARTICLES, WATER_TEMP_C
+    global PLAN_TEAMS, PLAN_SONAR_M, PLAN_SPEED_CELLS, PLAN_HORIZON, PLAN_HOUR
+
+    if inc.get('lat') not in (None, ''):
+        LKP_LAT = float(inc['lat'])
+    lon = inc.get('lng', inc.get('lon'))
+    if lon not in (None, ''):
+        LKP_LON = float(lon)
+    if inc.get('victimHeight') not in (None, ''):
+        BODY_HEIGHT_M = float(inc['victimHeight']) / 100.0      # cm -> m
+    if inc.get('victimWeight') not in (None, ''):
+        BODY_WEIGHT_KG = float(inc['victimWeight'])
+    if inc.get('waterTemp') not in (None, ''):
+        WATER_TEMP_C = float(inc['waterTemp'])
+    if inc.get('date'):
+        hhmm = (inc.get('timeFrom') or '00:00')
+        SEARCH_TIME = datetime.strptime(f"{inc['date']} {hhmm}", '%Y-%m-%d %H:%M')
+    if inc.get('durationHours') not in (None, ''):
+        RUN_DURATION = timedelta(hours=float(inc['durationHours']))
+    for key, g in (('teams', 'PLAN_TEAMS'), ('sonarRadius', 'PLAN_SONAR_M'),
+                   ('speed', 'PLAN_SPEED_CELLS'), ('horizon', 'PLAN_HORIZON'),
+                   ('planHour', 'PLAN_HOUR'), ('nParticles', 'N_PARTICLES')):
+        if inc.get(key) not in (None, ''):
+            globals()[g] = type(globals()[g])(inc[key])
+    print(f"  incident -> LKP ({LKP_LAT:.5f}, {LKP_LON:.5f}), "
+          f"body {BODY_HEIGHT_M:.2f} m / {BODY_WEIGHT_KG:.0f} kg, "
+          f"{PLAN_TEAMS} teams, T+{int(RUN_DURATION.total_seconds()//3600)}h window")
+
+
+def load_incident(path=INCIDENT_JSON):
+    """Apply incident.json from disk if it exists (CLI / manual workflow)."""
+    import json
+    if not os.path.exists(path):
+        return
+    with open(path, encoding='utf-8') as fh:
+        apply_incident(json.load(fh))
 
 
 def download_currents_subset():
@@ -128,14 +215,27 @@ def download_currents_subset():
     window / depth cap, so the run reads locally instead of streaming the whole
     Mediterranean per step. Returns the local file path.
 
-    Re-downloaded when REFRESH_DATA is True (always-fresh forecast); otherwise an
-    existing file for the same name is reused.
+    The file is named after the subset PARAMETERS (LKP / time / depth / box), so
+    two runs with the same inputs reuse one cache and -- crucially on Windows --
+    a new run never tries to overwrite a file an earlier run may still hold open
+    (that lock was what made the live run hang). Set REFRESH_DATA=True to force a
+    fresh download for the current parameters.
     """
     import copernicusmarine
     t0 = SEARCH_TIME - timedelta(hours=2)                  # small read-buffer
     t1 = SEARCH_TIME + RUN_DURATION + timedelta(hours=2)
+
+    key = (f"{LKP_LAT:.3f}_{LKP_LON:.3f}_{SEARCH_TIME:%Y%m%d%H}_"
+           f"{int(RUN_DURATION.total_seconds()//3600)}h_"
+           f"{int(MAX_DEPTH_M)}m_{SUBSET_MARGIN_DEG}")
+    fname = f"currents_{key}.nc"
+    path = os.path.join(OUTDIR, fname)
+    if os.path.exists(path) and not REFRESH_DATA:
+        print(f"  reusing cached currents: {fname}")
+        return path
+
     print(f"  currents subset: {t0:%Y-%m-%d %H:%M}..{t1:%Y-%m-%d %H:%M} UTC, "
-          f"0-{MAX_DEPTH_M:.0f} m, +/-{SUBSET_MARGIN_DEG} deg around LKP")
+          f"0-{MAX_DEPTH_M:.0f} m, +/-{SUBSET_MARGIN_DEG} deg around LKP -> {fname}")
     copernicusmarine.subset(
         dataset_id='cmems_mod_med_phy-cur_anfc_4.2km-3D_PT1H-m',
         variables=['uo', 'vo'],
@@ -146,11 +246,10 @@ def download_currents_subset():
         minimum_depth=0.0, maximum_depth=MAX_DEPTH_M,
         start_datetime=t0.strftime('%Y-%m-%dT%H:%M:%S'),
         end_datetime=t1.strftime('%Y-%m-%dT%H:%M:%S'),
-        output_filename=os.path.basename(CURFILE), output_directory=OUTDIR,
+        output_filename=fname, output_directory=OUTDIR,
         username=CMEMS_USER, password=CMEMS_PASS,
-        overwrite=REFRESH_DATA, skip_existing=not REFRESH_DATA,
-        disable_progress_bar=True)
-    return CURFILE
+        overwrite=True, disable_progress_bar=True)
+    return path
 
 
 def build_model():
@@ -357,10 +456,11 @@ def make_state_probability(ncfile, query_hours=PROB_QUERY_HOURS):
 
 
 def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
-                    intensity=0.45):
+                    intensity=0.45, search_plan=None):
     """Write the simulation result as JSON the React drift-app map loads:
     one heatmap frame per output hour ([lat, lon, intensity] points) plus the
-    afloat/submerged/stranded probability of each frame and the LKP."""
+    afloat/submerged/stranded probability of each frame, the LKP, and (if
+    provided) the coordinated search plan from core.search_planner."""
     import json
 
     ds = xr.open_dataset(ncfile)
@@ -399,12 +499,203 @@ def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
         'source': SOURCE,
         'n_particles': int(N_PARTICLES),
         'frames': frames,
+        'search_plan': search_plan,        # may be None if planning was skipped
     }
     out_path = os.path.normpath(out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, 'w', encoding='utf-8') as fh:
         json.dump(data, fh)
     print(f'  app JSON -> {out_path} ({ntime} frames x {len(sel)} pts)')
+
+
+def _plan_prob_grid(ncfile, hour=PLAN_HOUR, cell_m=PLAN_GRID_M):
+    """Probability heatmap (as a dense grid) of the body's location at forecast
+    `hour`, built from the particle cloud at that frame. Returns
+    (prob, xe, ye, hour) where prob[row=lat, col=lon] sums to 1 and xe/ye are
+    the cell EDGES in lon/lat so grid cells map back to real coordinates.
+
+    The grid extent is stretched east to the coastline (~35.05 E) so the SHORE
+    is inside the grid -- the planner launches teams from there."""
+    ds = xr.open_dataset(ncfile)
+    lon = ds['lon'].values
+    lat = ds['lat'].values
+    times = ds['time'].values
+    ds.close()
+    hours = (times - times[0]) / np.timedelta64(1, 'h')
+    t = int(np.argmin(np.abs(hours - hour)))     # nearest available frame
+
+    la = lat[:, t]
+    lo = lon[:, t]
+    good = np.isfinite(la) & np.isfinite(lo)
+    la, lo = la[good], lo[good]
+
+    pad = 0.01
+    extent = [min(lo.min(), LKP_LON) - pad, max(lo.max(), LKP_LON) + pad,
+              min(la.min(), LKP_LAT) - pad, max(la.max(), LKP_LAT) + pad]
+    extent[1] = max(extent[1], 35.05)            # reach the shore
+    counts, xe, ye = _count_grid(lo, la, extent, cell_m, sigma=1)
+    total = counts.sum()
+    prob = counts / total if total else counts
+    return prob, xe, ye, int(round(hours[t]))
+
+
+def _water_mask(xe, ye):
+    """Boolean grid (row=lat, col=lon): True where the cell centre is SEA.
+    Uses global_land_mask; falls back to all-water if it isn't installed."""
+    xc = 0.5 * (xe[:-1] + xe[1:])
+    yc = 0.5 * (ye[:-1] + ye[1:])
+    LON, LAT = np.meshgrid(xc, yc)               # shape (ny, nx)
+    try:
+        from global_land_mask import globe
+        return ~globe.is_land(LAT, LON)
+    except Exception as exc:
+        print('  [land mask unavailable, treating all cells as water]:', exc)
+        return np.ones((len(yc), len(xc)), dtype=bool)
+
+
+def _shore_launch_cells(water, prob, k, min_spacing=3):
+    """Pick `k` SHORE launch cells: sea cells adjacent to land, chosen nearest
+    to the probability mass and spaced at least `min_spacing` cells apart so
+    teams don't all put in at the same beach. Returns a list of (row, col).
+
+    Falls back to the probability peak if there is no coastline in view."""
+    from scipy.ndimage import binary_dilation
+    land = ~water
+    # sea cells touching land = coastline launch points
+    coast = water & binary_dilation(land)
+    rr, cc = np.nonzero(coast)
+    if rr.size == 0:                              # no shore in grid -> peak
+        pr, pc = np.unravel_index(int(np.argmax(prob)), prob.shape)
+        return [(int(pr), int(pc))] * k
+
+    # mass centroid of the probability cloud (what teams want to reach)
+    pr_idx, pc_idx = np.nonzero(prob > 0)
+    if pr_idx.size:
+        w = prob[pr_idx, pc_idx]
+        cy = float((pr_idx * w).sum() / w.sum())
+        cx = float((pc_idx * w).sum() / w.sum())
+    else:
+        cy, cx = prob.shape[0] / 2, prob.shape[1] / 2
+
+    order = np.argsort(np.hypot(rr - cy, cc - cx))   # nearest shore to mass first
+    chosen = []
+    for idx in order:
+        cell = (int(rr[idx]), int(cc[idx]))
+        if all(np.hypot(cell[0] - s[0], cell[1] - s[1]) >= min_spacing
+               for s in chosen):
+            chosen.append(cell)
+        if len(chosen) == k:
+            break
+    while len(chosen) < k:                         # fewer shore cells than teams
+        chosen.append(chosen[len(chosen) % max(1, len(chosen))]
+                      if chosen else (int(rr[order[0]]), int(cc[order[0]])))
+    return chosen
+
+
+def _cell_to_lonlat(r, c, xe, ye):
+    """Centre lon/lat of grid cell (row=lat index r, col=lon index c)."""
+    lon = 0.5 * (float(xe[c]) + float(xe[c + 1]))
+    lat = 0.5 * (float(ye[r]) + float(ye[r + 1]))
+    return lon, lat
+
+
+def plan_search(ncfile, hour=None):
+    """Route the heterogeneous rescue team over the body-probability heatmap at
+    forecast `hour` (defaults to PLAN_HOUR) using core.search_planner. Teams
+    launch FROM SHORE and may only travel over water. Returns a JSON-
+    serialisable plan dict plus the raw planner result and grid for plotting."""
+    if hour is None:
+        hour = PLAN_HOUR
+    prob, xe, ye, hour = _plan_prob_grid(ncfile, hour=hour)
+    ny, nx = prob.shape
+
+    # water-only navigation: agents can't cross land, and land cells hold no
+    # probability so scanning them is worthless.
+    water = _water_mask(xe, ye)
+    prob = prob * water
+    if prob.sum():
+        prob = prob / prob.sum()
+
+    # sonar radius (m) -> grid cells (>=1 so a sweep always covers neighbours)
+    sonar_cells = max(1, int(round(PLAN_SONAR_M / PLAN_GRID_M)))
+    # teams put to sea from the nearest shore points to the probability mass
+    starts = _shore_launch_cells(water, prob, PLAN_TEAMS)
+
+    agents = [Agent(starts[i], speed=PLAN_SPEED_CELLS, sonar_radius=sonar_cells,
+                    name=chr(65 + i), color=PLAN_COLORS[i % len(PLAN_COLORS)])
+              for i in range(PLAN_TEAMS)]
+    planner = CoveragePlanner(prob, agents, horizon=PLAN_HORIZON,
+                              connectivity=8, passable=water,
+                              dispersion=PLAN_DISPERSION)
+    res = planner.plan()
+
+    teams = []
+    for a in agents:
+        waypoints = [[round(lat, 5), round(lon, 5)]              # -> [lat, lon]
+                     for (r, c) in a.path
+                     for (lon, lat) in [_cell_to_lonlat(r, c, xe, ye)]]
+        teams.append({
+            'team': a.name, 'color': a.color,
+            'speed': a.speed, 'sonar_radius_m': PLAN_SONAR_M,
+            'cleared_pct': round(a.cleared_prob * 100, 1),
+            'waypoints': waypoints,
+        })
+
+    plan = {
+        'plan_hour': hour,
+        'grid_m': PLAN_GRID_M,
+        'horizon': PLAN_HORIZON,
+        'sonar_radius_m': PLAN_SONAR_M,
+        'total_cleared_pct': round(res['cleared_fraction'] * 100, 1),
+        'coverage_over_time': [round(float(x) * 100, 1)
+                               for x in res['coverage_over_time']],
+        'teams': teams,
+    }
+    print(f"  search plan: {PLAN_TEAMS} teams, T={PLAN_HORIZON}, "
+          f"sonar {PLAN_SONAR_M} m -> {plan['total_cleared_pct']:.1f}% "
+          f"probability cleared (plan hour {hour})")
+    return plan, res, prob, xe, ye
+
+
+def make_search_plan_map(plan, prob, xe, ye):
+    """Draw the coordinated search plan (team paths) over the probability grid
+    on a coastline basemap."""
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    extent = [xe[0], xe[-1], ye[0], ye[-1]]
+    extent[1] = max(extent[1], 35.05)
+    Hm = np.ma.masked_where(prob <= 0, prob)
+
+    proj = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(9, 8))
+    ax = plt.axes(projection=proj)
+    ax.set_extent(extent, crs=proj)
+    ax.add_feature(cfeature.LAND.with_scale('10m'), facecolor='#e8e2d0', zorder=1)
+    ax.add_feature(cfeature.OCEAN.with_scale('10m'), facecolor='#dfeefc', zorder=0)
+    ax.coastlines(resolution='10m', linewidth=0.8, zorder=2)
+    ax.pcolormesh(xe, ye, Hm, transform=proj, cmap='inferno', alpha=0.7,
+                  zorder=3, shading='flat')
+
+    for tm in plan['teams']:
+        lats = [p[0] for p in tm['waypoints']]
+        lons = [p[1] for p in tm['waypoints']]
+        ax.plot(lons, lats, '-o', color=tm['color'], ms=3, lw=1.8, zorder=5,
+                transform=proj, label=f"Team {tm['team']} ({tm['cleared_pct']}%)")
+        ax.plot(lons[0], lats[0], marker='s', color=tm['color'], ms=9,
+                mec='black', zorder=6, transform=proj)
+    ax.plot(LKP_LON, LKP_LAT, marker='*', color='cyan', ms=18, mec='black',
+            transform=proj, zorder=7, label='LKP')
+
+    gl = ax.gridlines(draw_labels=True, alpha=0.3)
+    gl.top_labels = gl.right_labels = False
+    ax.legend(loc='upper right', fontsize=9)
+    ax.set_title(f"Coordinated search plan @ T+{plan['plan_hour']}h  "
+                 f"({PLAN_TEAMS} teams, {plan['total_cleared_pct']}% cleared)")
+    out = os.path.join(OUTDIR, 'search_plan_map.png')
+    fig.savefig(out, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print('  search-plan map ->', out)
 
 
 def make_interactive_map(ncfile, max_particles=2500):
@@ -529,12 +820,57 @@ show(0);
 """
 
 
-def main():
+class _ProgressLogHandler(logging.Handler):
+    """Parses OpenDrift's 'step i of N' INFO lines into a 0..1 fraction so a
+    caller (e.g. the API loading bar) can track the drift run in real time."""
+    _re = re.compile(r'step (\d+) of (\d+)')
+
+    def __init__(self, cb):
+        super().__init__()
+        self.cb = cb
+
+    def emit(self, record):
+        try:
+            m = self._re.search(record.getMessage())
+            if m and int(m.group(2)):
+                self.cb(min(1.0, int(m.group(1)) / int(m.group(2))))
+        except Exception:
+            pass
+
+
+def run_pipeline(progress_cb=None, incident=None):
+    """Run the WHOLE pipeline end-to-end and report progress.
+
+    `incident` (a dict from the React form) overrides LKP / victim / time /
+    teams; if None we fall back to incident.json on disk. `progress_cb(percent,
+    stage)` is called throughout (0..100) so a frontend can show a loading bar.
+    Returns the computed search-plan dict."""
+    def p(pct, stage):
+        if progress_cb:
+            progress_cb(float(pct), stage)
+        print(f'  [{pct:5.1f}%] {stage}')
+
+    if incident is not None:
+        apply_incident(incident)
+    else:
+        load_incident()
+
+    p(2, 'Fetching ocean currents' if SOURCE == 'copernicus'
+         else 'Initialising model')
     o = build_model()
+    p(8, 'Seeding particles')
     seed(o)
-    o.run(duration=RUN_DURATION, time_step=TIME_STEP,
-          time_step_output=OUTPUT_STEP, outfile=NCFILE)
-    print(o)
+
+    handler = _ProgressLogHandler(
+        lambda frac: p(10 + 68 * frac, 'Running drift simulation'))
+    oplog = logging.getLogger('opendrift')
+    oplog.addHandler(handler)
+    try:
+        p(10, 'Running drift simulation')
+        o.run(duration=RUN_DURATION, time_step=TIME_STEP,
+              time_step_output=OUTPUT_STEP, outfile=NCFILE)
+    finally:
+        oplog.removeHandler(handler)
 
     groups = [o.elements, o.elements_deactivated]
     phase = np.concatenate([g.phase for g in groups if g.phase.size])
@@ -542,12 +878,68 @@ def main():
           f'submerged={int(np.sum(phase==0))} '
           f'rising={int(np.sum(phase==2))} surface={int(np.sum(phase==3))}')
 
+    p(80, 'Rendering heatmap')
     make_heatmap_map(o)
     make_state_probability(NCFILE)
+
+    p(88, 'Planning coordinated search')
+    plan, _res, prob, xe, ye = plan_search(NCFILE)
+    make_search_plan_map(plan, prob, xe, ye)
+
+    p(94, 'Exporting results')
     make_interactive_map(NCFILE)
-    export_app_json(NCFILE)
+    export_app_json(NCFILE, search_plan=plan)
+    p(100, 'Done')
+    return plan
+
+
+def _write_progress(path, **state):
+    """Atomically write the progress JSON (temp + replace) so the API never
+    reads a half-written file."""
+    import json
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(state, fh)
+    os.replace(tmp, path)
+
+
+def run_as_job(incident_path, progress_path):
+    """Run the pipeline as a stand-alone process, streaming progress to a JSON
+    file the API polls. Used by api/server.py so each run is isolated (releases
+    file handles on exit; Copernicus runs in a clean main thread)."""
+    import json
+    with open(incident_path, encoding='utf-8') as fh:
+        incident = json.load(fh)
+    state = {'percent': 0.0, 'stage': 'Starting', 'done': False, 'error': None}
+    _write_progress(progress_path, **state)
+
+    def cb(percent, stage):
+        state['percent'] = round(float(percent), 1)
+        state['stage'] = stage
+        _write_progress(progress_path, **state)
+
+    try:
+        run_pipeline(progress_cb=cb, incident=incident)
+        state.update(percent=100.0, stage='Done', done=True)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        state.update(done=True, error=str(exc))
+    _write_progress(progress_path, **state)
+
+
+def main():
+    run_pipeline()
     print('Done. Outputs in', OUTDIR)
 
 
 if __name__ == '__main__':
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description='Drowned-body drift + search plan')
+    ap.add_argument('--incident', help='incident JSON to run as an API job')
+    ap.add_argument('--progress', help='progress JSON file to stream into')
+    a = ap.parse_args()
+    if a.incident and a.progress:
+        run_as_job(a.incident, a.progress)
+    else:
+        main()
