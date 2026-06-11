@@ -1,5 +1,7 @@
 <div align="center">
 
+![Project Logo](hacklogo.png)
+
 # 🌊 Nahshon · נחשון
 
 ### Probabilistic drift modeling for maritime search & rescue
