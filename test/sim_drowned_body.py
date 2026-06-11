@@ -15,61 +15,173 @@ Outputs go to ./output/ next to this script.
 
 import os
 import sys
+import logging
 from datetime import datetime, timedelta
 
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 
+# copernicusmarine downloads via many parallel S3 connections; urllib3's default
+# pool holds only 10, so it logs harmless "Connection pool is full" warnings as
+# it closes the extras. The download still completes fully -- just quiet them.
+logging.getLogger('urllib3.connectionpool').setLevel(logging.ERROR)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from opendrift.readers import reader_constant
 from opendrift.readers import reader_global_landmask
+from opendrift.readers import reader_netCDF_CF_generic
 
-from core.drowned_drift import DrownedBodyDrift, refloat_time_seconds
+from core.drowned_drift import (
+    DrownedBodyDrift, refloat_time_seconds, drown_delay_seconds, body_dynamics,
+    SURFACE_EPS)
 
 OUTDIR = os.path.join(HERE, 'output')
 os.makedirs(OUTDIR, exist_ok=True)
 
 # --- run parameters --------------------------------------------------------
-SOURCE        = 'offline'             # 'offline' (constant) or 'copernicus' (real 3D)
+SOURCE        = 'copernicus'             # 'offline' (constant) or 'copernicus' (real 3D)
 N_PARTICLES   = 10000                 # Monte Carlo ensemble size
 LKP_LON       = 34.92                 # last-known position (lon)
 LKP_LAT       = 32.83                 # last-known position (lat)
 LKP_RADIUS_M  = 300                   # position uncertainty of the LKP (m)
+
+# --- victim (drives sink/refloat timing via body_dynamics) -----------------
+BODY_HEIGHT_M = 1.75                  # victim height (m)
+BODY_WEIGHT_KG = 75.0                 # victim weight (kg)
+
+# --- LKP-time (drowning) uncertainty ---------------------------------------
+# We rarely know the exact moment of drowning: the victim drifts at the
+# surface for some minutes after the last-known position, THEN goes under and
+# the sink/drift cycle begins. Each particle draws its own delay (triangular,
+# peaking at MODE, capped at MAX), so the start of the underwater drift -- and
+# thus the whole forecast -- is itself uncertain.
+DROWN_TIME_MAX_MIN  = 30.0            # latest the victim could have gone under
+DROWN_TIME_MODE_MIN = 4.0            # most-likely time to drown (peak of the pdf)
+
+# --- when to search (you control this) -------------------------------------
+# LKP date/time in UTC: when the victim was last seen / went into the water.
+# The drift forecast runs from here for RUN_DURATION. Must fall inside the
+# Copernicus anfc window (~8 months back to a few days ahead of today).
+SEARCH_TIME   = datetime(2026, 6, 8, 6, 0, 0)
 RUN_DURATION  = timedelta(days=3)     # search window
 TIME_STEP     = 900                   # 15 min integration step
 OUTPUT_STEP   = 3600                  # save a frame every hour
 NCFILE        = os.path.join(OUTDIR, 'drowned.nc')
 
+# --- Copernicus data subset (download-once, read-local) --------------------
+# Streaming the whole Mediterranean per step is what made the run slow. Instead
+# we download a SMALL local NetCDF covering just the search box / time window /
+# shallow depth, then read it locally. Re-downloaded every run so you always
+# get the latest forecast for the SEARCH_TIME you picked.
+CMEMS_USER        = 'yairtheop1@gmail.com'
+CMEMS_PASS        = '6dewk7ymVUj*j4h'
+MAX_DEPTH_M       = 200.0   # only fetch currents down to here (Haifa shelf is shallow)
+SUBSET_MARGIN_DEG = 0.8     # half-width of the box around the LKP (~75 km of drift room)
+REFRESH_DATA      = True    # True = re-download the subset each run (latest forecast)
+CURFILE           = os.path.join(OUTDIR, 'haifa_currents.nc')
+
+# --- stochastic forcing (Gaussian noise) -----------------------------------
+# Real drift is noisier than any gridded current field: sub-grid turbulence,
+# eddies and unresolved wind gusts scatter a search object. We model that as
+# Gaussian noise so the ensemble spreads into a realistic uncertainty cone --
+# and, crucially, so a body can wander a little, hit a DIFFERENT current and
+# branch off ("went 200 m north, got caught in another stream"). That branching
+# only happens with SOURCE='copernicus' (the real, spatially-varying field); a
+# constant offline current just blurs, it has no other stream to catch.
+# Turn these UP for a wilder, more uncertain fan-out; set to 0 for deterministic.
+#   * CURRENT_UNCERTAINTY    -- std-dev of Gaussian noise added to the current
+#                               velocity EVERY step (m/s). 0.05 = mild,
+#                               0.1-0.2 = clearly chaotic. 0 = off.
+#   * HORIZONTAL_DIFFUSIVITY -- eddy-diffusion random walk (m^2/s); cloud grows
+#                               ~sqrt(2*K*t). 1 = tight, 10-50 = bodies roam far
+#                               enough to catch other streams. 0 = off.
+CURRENT_UNCERTAINTY    = 0.10   # m/s
+HORIZONTAL_DIFFUSIVITY = 10.0   # m^2/s
+
+# --- afloat / drowned probability ------------------------------------------
+# At each of these times (hours since the LKP) we report the probability that
+# the body is AFLOAT (at the surface -> visible, wind-driftable, spottable) vs
+# SUBMERGED (underwater), measured as the fraction of the ensemble in each
+# state. Useful for deciding when a surface/air search is worthwhile.
+PROB_QUERY_HOURS = [1, 6, 12, 24, 48, 72]
+
+# --- heatmap grid ----------------------------------------------------------
+# The static map bins the final particle cloud into square cells and colours
+# each cell by HOW MANY bodies land in it. Smaller cell -> finer grid.
+HEATMAP_GRID_M = 300    # grid cell size in metres
+HEATMAP_SMOOTH = 0      # gaussian smoothing in cells (0 = crisp grid boxes)
+
 rng = np.random.default_rng(42)       # reproducible ensemble
+
+
+def download_currents_subset():
+    """Download a SMALL local NetCDF of 3D currents for the search box / time
+    window / depth cap, so the run reads locally instead of streaming the whole
+    Mediterranean per step. Returns the local file path.
+
+    Re-downloaded when REFRESH_DATA is True (always-fresh forecast); otherwise an
+    existing file for the same name is reused.
+    """
+    import copernicusmarine
+    t0 = SEARCH_TIME - timedelta(hours=2)                  # small read-buffer
+    t1 = SEARCH_TIME + RUN_DURATION + timedelta(hours=2)
+    print(f"  currents subset: {t0:%Y-%m-%d %H:%M}..{t1:%Y-%m-%d %H:%M} UTC, "
+          f"0-{MAX_DEPTH_M:.0f} m, +/-{SUBSET_MARGIN_DEG} deg around LKP")
+    copernicusmarine.subset(
+        dataset_id='cmems_mod_med_phy-cur_anfc_4.2km-3D_PT1H-m',
+        variables=['uo', 'vo'],
+        minimum_longitude=LKP_LON - SUBSET_MARGIN_DEG,
+        maximum_longitude=LKP_LON + SUBSET_MARGIN_DEG,
+        minimum_latitude=LKP_LAT - SUBSET_MARGIN_DEG,
+        maximum_latitude=LKP_LAT + SUBSET_MARGIN_DEG,
+        minimum_depth=0.0, maximum_depth=MAX_DEPTH_M,
+        start_datetime=t0.strftime('%Y-%m-%dT%H:%M:%S'),
+        end_datetime=t1.strftime('%Y-%m-%dT%H:%M:%S'),
+        output_filename=os.path.basename(CURFILE), output_directory=OUTDIR,
+        username=CMEMS_USER, password=CMEMS_PASS,
+        overwrite=REFRESH_DATA, skip_existing=not REFRESH_DATA,
+        disable_progress_bar=True)
+    return CURFILE
 
 
 def build_model():
     o = DrownedBodyDrift(loglevel=20)
+
+    # Height & weight -> sink/rise speeds (refloat base is applied per-particle
+    # in seed()). Leaner bodies sink faster and refloat slower; heavier-set
+    # bodies are near-neutral and bob back sooner.
+    dyn = body_dynamics(BODY_HEIGHT_M, BODY_WEIGHT_KG)
+    o.sink_speed = dyn['sink']
+    o.rise_speed = dyn['rise']
+    print(f"  body {BODY_HEIGHT_M:.2f} m / {BODY_WEIGHT_KG:.0f} kg "
+          f"(BMI {dyn['bmi']:.1f}, density {dyn['density']:.0f} kg/m^3) -> "
+          f"sink {dyn['sink']:.3f} m/s, rise {dyn['rise']:.3f} m/s, "
+          f"refloat ~{dyn['refloat']/3600:.1f} h")
+
     o.add_reader(reader_global_landmask.Reader())
 
     if SOURCE == 'copernicus':
-        # === REAL 3D DATA ===================================================
-        # Requires: pip install copernicusmarine  +  `copernicusmarine login`.
+        # === REAL 3D DATA (downloaded once, read locally) ===================
+        # Requires: pip install copernicusmarine. We subset a small local file
+        # for the search box/time/depth (see download_currents_subset) and read
+        # it with the generic NetCDF reader -- uo/vo carry standard_names, so
+        # they are auto-rotated to x/y_sea_water_velocity and interpolated to
+        # each particle's depth.
         from opendrift.readers import reader_copernicusmarine
-
-        # 3D Mediterranean hourly currents -- NOTE: no "-2D", so it carries a
-        # `depth` axis. OpenDrift interpolates the current to each particle's z.
-        currents = reader_copernicusmarine.Reader(
-            'cmems_mod_med_phy-cur_anfc_4.2km_PT1H-m')
+        cur_path = download_currents_subset()
+        currents = reader_netCDF_CF_generic.Reader(cur_path, name='CMEMS-3D-local')
         o.add_reader(currents)
 
         # Bathymetry for sea_floor_depth_below_sea_level so bodies rest on the
-        # real seabed instead of the flat 100 m fallback. The Med static
-        # dataset carries `deptho`; after `copernicusmarine login` confirm the
-        # id and variable with `copernicusmarine describe -c <id>`. If its
-        # standard_name isn't picked up automatically, pass
-        # standard_name_mapping={'deptho': 'sea_floor_depth_below_sea_level'}.
+        # real seabed instead of the flat 100 m fallback. Static (no time axis),
+        # so a single one-off stream is cheap -- no need to cache it locally.
         try:
             bathy = reader_copernicusmarine.Reader(
-                'cmems_mod_med_phy_anfc_4.2km_static')
+                'cmems_mod_med_phy_anfc_4.2km_static',
+                username=CMEMS_USER, password=CMEMS_PASS)
             o.add_reader(bathy)
         except Exception as exc:
             print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
@@ -88,18 +200,26 @@ def build_model():
     o.set_config('general:seafloor_action', 'lift_to_seafloor')
     o.set_config('drift:vertical_advection', True)
     o.set_config('drift:vertical_mixing', False)
+
+    # Gaussian noise -> realistic ensemble spread (see top of file to tune).
+    o.set_config('drift:current_uncertainty', CURRENT_UNCERTAINTY)
+    o.set_config('drift:horizontal_diffusivity', HORIZONTAL_DIFFUSIVITY)
     return o
 
 
 def seed(o):
-    start = datetime(2025, 1, 1, 0, 0, 0)
-    refloat = refloat_time_seconds(N_PARTICLES, rng=rng)          # ~1 day placeholder
+    start = SEARCH_TIME                      # you set this at the top of the file
+    # per-particle uncertain LKP->drown delay (0..30 min) and body-driven timers
+    drown   = drown_delay_seconds(N_PARTICLES, DROWN_TIME_MAX_MIN,
+                                  DROWN_TIME_MODE_MIN, rng=rng)
+    refloat = refloat_time_seconds(N_PARTICLES, BODY_HEIGHT_M, BODY_WEIGHT_KG,
+                                   rng=rng)
     surface = (rng.uniform(3, 9, N_PARTICLES) * 3600.0).astype(np.float32)
     o.seed_elements(
         lon=LKP_LON, lat=LKP_LAT, radius=LKP_RADIUS_M,
         number=N_PARTICLES, time=start, z=0,
-        phase=0, phase_start_age=0,
-        refloat_time=refloat, surface_time=surface,
+        phase=1, phase_start_age=0,          # start in the DROWNING phase
+        drown_delay=drown, refloat_time=refloat, surface_time=surface,
     )
     return o
 
@@ -107,18 +227,23 @@ def seed(o):
 # ---------------------------------------------------------------------------
 # Visualisation
 # ---------------------------------------------------------------------------
-def _heat_grid(lon, lat, extent, bins=200, sigma=2):
-    """Smoothed, normalised 2D density on a regular grid."""
+def _count_grid(lon, lat, extent, cell_m, sigma=0):
+    """Particle COUNT per grid cell on a regular lon/lat grid whose cells are
+    ~`cell_m` metres square. Returns the count grid (axis0=lat, axis1=lon) and
+    the cell EDGES (xe, ye) so pcolormesh can draw real boxes."""
     from scipy.ndimage import gaussian_filter
+    midlat = 0.5 * (extent[2] + extent[3])
+    dlon = cell_m / (111_320.0 * np.cos(np.radians(midlat)))   # m -> deg lon
+    dlat = cell_m / 110_540.0                                  # m -> deg lat
+    nx = max(1, int(round((extent[1] - extent[0]) / dlon)))
+    ny = max(1, int(round((extent[3] - extent[2]) / dlat)))
     H, xe, ye = np.histogram2d(
-        lon, lat, bins=bins,
+        lon, lat, bins=[nx, ny],
         range=[[extent[0], extent[1]], [extent[2], extent[3]]])
-    H = gaussian_filter(H.T, sigma=sigma)          # .T -> axis0 = lat
-    if H.sum():
-        H = H / H.sum()
-    xc = 0.5 * (xe[:-1] + xe[1:])
-    yc = 0.5 * (ye[:-1] + ye[1:])
-    return H, xc, yc
+    H = H.T                                         # .T -> axis0 = lat
+    if sigma:
+        H = gaussian_filter(H, sigma=sigma)
+    return H, xe, ye
 
 
 def make_heatmap_map(o):
@@ -137,9 +262,10 @@ def make_heatmap_map(o):
               min(lat.min(), LKP_LAT) - pad, max(lat.max(), LKP_LAT) + pad]
     # always reach the Haifa coastline (~35.0 E) so the land shows on the map
     extent[1] = max(extent[1], 35.05)
-    H, xc, yc = _heat_grid(lon, lat, extent)
-    # hide the faint Gaussian halo: only show cells above 2% of the peak
-    Hm = np.ma.masked_where(H < H.max() * 0.02, H)
+    counts, xe, ye = _count_grid(lon, lat, extent, HEATMAP_GRID_M,
+                                 sigma=HEATMAP_SMOOTH)
+    # colour each cell by particle count; leave empty cells transparent
+    Hm = np.ma.masked_where(counts < 1, counts)
 
     proj = ccrs.PlateCarree()
     fig = plt.figure(figsize=(9, 8))
@@ -149,20 +275,79 @@ def make_heatmap_map(o):
     ax.add_feature(cfeature.OCEAN.with_scale('10m'), facecolor='#dfeefc', zorder=0)
     ax.coastlines(resolution='10m', linewidth=0.8, zorder=2)
 
-    mesh = ax.pcolormesh(xc, yc, Hm, transform=proj, cmap='inferno',
-                         alpha=0.75, zorder=3, shading='auto')
+    # shading='flat' with edge arrays draws one solid box per grid cell
+    mesh = ax.pcolormesh(xe, ye, Hm, transform=proj, cmap='inferno',
+                         alpha=0.8, zorder=3, shading='flat')
     ax.plot(LKP_LON, LKP_LAT, marker='*', color='cyan', ms=18,
             mec='black', transform=proj, zorder=4, label='LKP')
     gl = ax.gridlines(draw_labels=True, alpha=0.3)
     gl.top_labels = gl.right_labels = False
     ax.legend(loc='upper right')
-    ax.set_title(f'Drowned-body probability after {RUN_DURATION} '
-                 f'({len(lon)} particles, source={SOURCE})')
-    fig.colorbar(mesh, ax=ax, label='probability density', shrink=0.8)
+    ax.set_title(f'Drowned-body density after {RUN_DURATION} '
+                 f'({len(lon)} particles, {HEATMAP_GRID_M} m grid, source={SOURCE})')
+    fig.colorbar(mesh, ax=ax,
+                 label=f'bodies per {HEATMAP_GRID_M} m cell', shrink=0.8)
     out = os.path.join(OUTDIR, 'drowned_heatmap_map.png')
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print('  static map ->', out)
+
+
+def state_probabilities(ncfile):
+    """Per-output-frame probability that the body is AFLOAT vs SUBMERGED vs
+    STRANDED, from the fraction of the ensemble in each state. Returns
+    (hours, p_afloat, p_submerged, p_stranded), each a 1D array over time."""
+    ds = xr.open_dataset(ncfile)
+    z = ds['z'].values                          # (trajectory, time)
+    times = ds['time'].values
+    ds.close()
+    ntraj = z.shape[0]
+    hours = (times - times[0]) / np.timedelta64(1, 'h')
+
+    finite = np.isfinite(z)                     # still-active particles
+    afloat = finite & (z >= -SURFACE_EPS)       # at/near the surface
+    submerged = finite & (z < -SURFACE_EPS)     # underwater
+    p_afloat = afloat.sum(axis=0) / ntraj
+    p_submerged = submerged.sum(axis=0) / ntraj
+    p_stranded = 1.0 - finite.sum(axis=0) / ntraj   # deactivated (beached)
+    return hours, p_afloat, p_submerged, p_stranded
+
+
+def make_state_probability(ncfile, query_hours=PROB_QUERY_HOURS):
+    """Report P(afloat) vs P(submerged) at the requested times and save a
+    time-series plot of how the body's state probability evolves."""
+    hours, p_afloat, p_sub, p_strand = state_probabilities(ncfile)
+
+    print('  afloat / submerged probability:')
+    for qh in query_hours:
+        if qh > hours[-1] + 1e-6:
+            continue                            # beyond the simulated window
+        k = int(np.argmin(np.abs(hours - qh)))
+        print(f'    t={hours[k]:5.1f} h  afloat={p_afloat[k]*100:5.1f}%  '
+              f'submerged={p_sub[k]*100:5.1f}%  stranded={p_strand[k]*100:5.1f}%')
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(hours, p_afloat * 100, color='#2f80ed', lw=2,
+            label='afloat (at surface)')
+    ax.plot(hours, p_sub * 100, color='#c0392b', lw=2,
+            label='submerged (underwater)')
+    if p_strand.max() > 0.005:
+        ax.plot(hours, p_strand * 100, color='#7f8c8d', lw=1.5, ls='--',
+                label='stranded (beached)')
+    for qh in query_hours:
+        if qh <= hours[-1] + 1e-6:
+            ax.axvline(qh, color='k', alpha=0.12, lw=1)
+    ax.set_xlabel('hours since LKP')
+    ax.set_ylabel('probability (%)')
+    ax.set_ylim(0, 100)
+    ax.grid(alpha=0.3)
+    ax.legend(loc='upper right')
+    ax.set_title(f'Body-state probability over time '
+                 f'({N_PARTICLES} particles, source={SOURCE})')
+    out = os.path.join(OUTDIR, 'drowned_vs_afloat.png')
+    fig.savefig(out, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print('  state-probability plot ->', out)
 
 
 def make_interactive_map(ncfile, max_particles=2500):
@@ -193,9 +378,17 @@ def make_interactive_map(ncfile, max_particles=2500):
                        for a, o in zip(la[good], lo[good])])
         labels.append(np.datetime_as_string(times[t], unit='h').replace('T', '  '))
 
+    # per-frame afloat / submerged / stranded percentages for the overlay
+    _, p_afloat, p_sub, p_strand = state_probabilities(ncfile)
+    afloat_pct = [round(float(x) * 100, 1) for x in p_afloat]
+    sub_pct    = [round(float(x) * 100, 1) for x in p_sub]
+    strand_pct = [round(float(x) * 100, 1) for x in p_strand]
+
     html = _TIME_MAP_TEMPLATE.format(
         lat=LKP_LAT, lon=LKP_LON,
         frames=json.dumps(frames), labels=json.dumps(labels),
+        afloat=json.dumps(afloat_pct), submerged=json.dumps(sub_pct),
+        stranded=json.dumps(strand_pct),
     )
     out = os.path.join(OUTDIR, 'drowned_heatmap_time.html')
     with open(out, 'w', encoding='utf-8') as fh:
@@ -219,8 +412,15 @@ _TIME_MAP_TEMPLATE = """<!DOCTYPE html>
   #bar button:hover{{background:#1c63c4}}
   #slider{{flex:1}}
   #label{{font-variant-numeric:tabular-nums;min-width:170px;font-size:15px}}
+  #stats{{position:absolute;top:12px;right:12px;z-index:1000;pointer-events:none;
+        background:rgba(31,41,51,0.85);color:#fff;padding:10px 14px;border-radius:8px;
+        font-size:14px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.3);
+        font-variant-numeric:tabular-nums}}
+  #stats b{{font-size:15px}}
+  #stats .afloat{{color:#5aa9ff}} #stats .sub{{color:#ff7a6b}} #stats .strand{{color:#b7c0c7}}
 </style></head><body>
 <div id="map"></div>
+<div id="stats"></div>
 <div id="bar">
   <button id="play">&#9658; Play</button>
   <button id="step">Step &#9654;&#9654;</button>
@@ -230,6 +430,9 @@ _TIME_MAP_TEMPLATE = """<!DOCTYPE html>
 <script>
 const FRAMES = {frames};
 const LABELS = {labels};
+const AFLOAT = {afloat};
+const SUB    = {submerged};
+const STRAND = {stranded};
 const N = FRAMES.length;
 const map = L.map('map').setView([{lat}, {lon}], 11);
 L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png',
@@ -241,6 +444,7 @@ const heat = L.heatLayer([], {{radius:18, blur:18, maxZoom:13,
 const slider = document.getElementById('slider');
 const label  = document.getElementById('label');
 const playBtn= document.getElementById('play');
+const stats  = document.getElementById('stats');
 slider.max = N - 1;
 let i = 0, timer = null;
 
@@ -249,6 +453,11 @@ function show(k){{
   heat.setLatLngs(FRAMES[i]);
   slider.value = i;
   label.textContent = 'frame ' + (i+1) + ' / ' + N + '   |   ' + LABELS[i];
+  let s = '<b>Body state</b><br>'
+        + '<span class="afloat">afloat&nbsp;&nbsp;&nbsp;' + AFLOAT[i].toFixed(1) + '%</span><br>'
+        + '<span class="sub">submerged ' + SUB[i].toFixed(1) + '%</span>';
+  if (STRAND[i] > 0.05) s += '<br><span class="strand">stranded&nbsp;' + STRAND[i].toFixed(1) + '%</span>';
+  stats.innerHTML = s;
 }}
 function play(){{
   if(timer){{ clearInterval(timer); timer=null; playBtn.innerHTML='&#9658; Play'; return; }}
@@ -272,10 +481,12 @@ def main():
 
     groups = [o.elements, o.elements_deactivated]
     phase = np.concatenate([g.phase for g in groups if g.phase.size])
-    print(f'  final phases: submerged={int(np.sum(phase==0))} '
+    print(f'  final phases: drowning={int(np.sum(phase==1))} '
+          f'submerged={int(np.sum(phase==0))} '
           f'rising={int(np.sum(phase==2))} surface={int(np.sum(phase==3))}')
 
     make_heatmap_map(o)
+    make_state_probability(NCFILE)
     make_interactive_map(NCFILE)
     print('Done. Outputs in', OUTDIR)
 
