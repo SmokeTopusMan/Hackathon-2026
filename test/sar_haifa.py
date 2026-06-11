@@ -17,6 +17,7 @@ Outputs are written to the ./output/ folder next to this script.
 
 import os
 from datetime import datetime, timedelta
+import xarray as xr
 from opendrift.models.leeway import Leeway
 from opendrift.readers import reader_constant
 from opendrift.readers import reader_global_landmask
@@ -52,14 +53,35 @@ currents = reader_copernicusmarine.Reader(
 )
 o.add_reader(currents)
 
+# --- Wind: NOAA GFS 10 m forecast ----------------------------------------
+# The Leeway model REQUIRES wind (x_wind/y_wind) -- leeway is the wind-driven
+# part of the drift, so without it the model refuses to run.
+#
+# We use the NOAA GFS "Best" 0.25-deg global forecast off THREDDS. That
+# aggregation can't be handed straight to reader_netCDF_CF_generic: its wind
+# variables live on a 7-level height axis (height_above_ground2 = 10..100 m)
+# and a wind-specific time axis (time1) that differs from the dataset's other
+# time axes. The generic reader detects a single global time/grid and then
+# tries to squeeze away those "extra" dimensions at read time -- which fails
+# because they have length > 1, and OpenDrift then reports x_wind/y_wind as
+# missing.
+#
+# Fix: pre-slice with xarray to the 10 m level, keep only the u/v wind vars
+# (which drops the conflicting time axes), rename the wind time axis to a
+# clean 'time', and pass that in-memory dataset to the reader.
 gfs_url = 'https://thredds.ucar.edu/thredds/dodsC/grib/NCEP/GFS/Global_0p25deg/Best'
+u_var = 'u-component_of_wind_height_above_ground'
+v_var = 'v-component_of_wind_height_above_ground'
+
+gfs = xr.open_dataset(gfs_url, decode_times=True)
+wind_ds = gfs[[u_var, v_var]].sel(height_above_ground2=10.0)
+wind_time_dim = [d for d in wind_ds[u_var].dims if 'time' in d][0]
+wind_ds = wind_ds.rename({wind_time_dim: 'time'})
 
 wind_reader = reader_netCDF_CF_generic.Reader(
-    gfs_url,
-    standard_name_mapping={
-        'u-component_of_wind_height_above_ground': 'x_wind',
-        'v-component_of_wind_height_above_ground': 'y_wind'
-    }
+    wind_ds,
+    standard_name_mapping={u_var: 'x_wind', v_var: 'y_wind'},
+    name='GFS-10m-wind',
 )
 
 o.add_reader(wind_reader)
