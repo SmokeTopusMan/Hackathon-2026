@@ -1,0 +1,8 @@
+# Generated simulation outputs
+output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
