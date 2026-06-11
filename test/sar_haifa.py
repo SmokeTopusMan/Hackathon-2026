@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from opendrift.models.leeway import Leeway
 from opendrift.readers import reader_constant
 from opendrift.readers import reader_global_landmask
+from opendrift.readers import reader_copernicusmarine
+from opendrift.readers import reader_netCDF_CF_generic
 
 # All outputs go in ./output relative to this script.
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,14 +45,24 @@ o.add_reader(reader_global_landmask.Reader())
 #   pushing things toward the Haifa/Carmel coast), weak northward current.
 # x_wind/y_wind are eastward/northward components in m/s.
 # x_sea_water_velocity/y_sea_water_velocity are eastward/northward in m/s.
-forcing = reader_constant.Reader({
-    'x_wind': 5.0,                  # eastward wind  (m/s)  -> pushes toward shore
-    'y_wind': -2.0,                 # southward wind (m/s)
-    'x_sea_water_velocity': 0.10,   # eastward current (m/s)
-    'y_sea_water_velocity': 0.15,   # northward current (m/s)
-})
-o.add_reader(forcing)
+currents = reader_copernicusmarine.Reader(
+    'cmems_mod_med_phy-cur_anfc_4.2km-2D_PT1H-m',
+    username='yairtheop1@gmail.com',
+    password='6dewk7ymVUj*j4h'
+)
+o.add_reader(currents)
 
+gfs_url = 'https://thredds.ucar.edu/thredds/dodsC/grib/NCEP/GFS/Global_0p25deg/Best'
+
+wind_reader = reader_netCDF_CF_generic.Reader(
+    gfs_url,
+    standard_name_mapping={
+        'u-component_of_wind_height_above_ground': 'x_wind',
+        'v-component_of_wind_height_above_ground': 'y_wind'
+    }
+)
+
+o.add_reader(wind_reader)
 # Stop particles when they hit the coast (typical for SAR planning).
 o.set_config('general:coastline_action', 'stranding')
 
