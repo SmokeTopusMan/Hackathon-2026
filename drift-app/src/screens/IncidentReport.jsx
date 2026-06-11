@@ -46,13 +46,14 @@ export default function IncidentReport() {
     return incidentData.date && 
            incidentData.timeFrom && 
            incidentData.timeTo && 
-           incidentData.victimName && 
+           incidentData.victimHeight && 
+           incidentData.victimWeight && 
            incidentData.lat && 
            incidentData.lng;
   };
 
-  const requiredFields = 6;
-  const filledFields = [incidentData.date, incidentData.timeFrom, incidentData.timeTo, incidentData.victimName, incidentData.lat, incidentData.lng].filter(Boolean).length;
+  const requiredFields = 7;
+  const filledFields = [incidentData.date, incidentData.timeFrom, incidentData.timeTo, incidentData.victimHeight, incidentData.victimWeight, incidentData.lat, incidentData.lng].filter(Boolean).length;
   const progressPercent = Math.round((filledFields / requiredFields) * 100);
 
   return (
@@ -145,8 +146,8 @@ export default function IncidentReport() {
             <h2 className="text-lg font-semibold border-b border-[#E2E8F0] pb-2 mb-4 text-[#0F766E]">3. Victim Profile</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="col-span-1 md:col-span-2">
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Full Name <span className="text-[#DC2626]">*</span></label>
-                <input type="text" required value={incidentData.victimName} onChange={e => updateIncident({ victimName: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
+                <label className="block text-sm font-medium text-[#0F172A] mb-1">Full Name</label>
+                <input type="text" value={incidentData.victimName} onChange={e => updateIncident({ victimName: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
               </div>
               
               <div>
@@ -164,13 +165,13 @@ export default function IncidentReport() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Used to estimate body density and drift depth profile">Height (cm) ℹ️</label>
-                <input type="number" min="0" value={incidentData.victimHeight} onChange={e => updateIncident({ victimHeight: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
+                <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Used to estimate body density and drift depth profile">Height (cm) <span className="text-[#DC2626]">*</span> ℹ️</label>
+                <input type="number" required min="0" value={incidentData.victimHeight} onChange={e => updateIncident({ victimHeight: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Used to estimate body density and drift depth profile">Weight (kg) ℹ️</label>
-                <input type="number" min="0" value={incidentData.victimWeight} onChange={e => updateIncident({ victimWeight: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
+                <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Used to estimate body density and drift depth profile">Weight (kg) <span className="text-[#DC2626]">*</span> ℹ️</label>
+                <input type="number" required min="0" value={incidentData.victimWeight} onChange={e => updateIncident({ victimWeight: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
               </div>
 
               <div className="col-span-1 md:col-span-2">

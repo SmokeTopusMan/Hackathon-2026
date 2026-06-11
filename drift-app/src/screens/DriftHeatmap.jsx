@@ -19,10 +19,10 @@ function HeatmapLayer({ points }) {
   React.useEffect(() => {
     if (!points || points.length === 0) return;
     const heat = L.heatLayer(points, {
-      radius: 25,
-      blur: 15,
-      maxZoom: 12,
-      gradient: { 0.2: '#facc15', 0.4: '#f97316', 0.6: '#ef4444', 0.8: '#991b1b', 1.0: '#7f1d1d' }
+      radius: 18,
+      blur: 18,
+      maxZoom: 13,
+      gradient: { 0.2: 'blue', 0.4: 'lime', 0.6: 'orange', 1.0: 'red' }
     }).addTo(map);
     return () => {
       map.removeLayer(heat);
@@ -91,10 +91,7 @@ export default function DriftHeatmap() {
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [showScanned, setShowScanned] = useState(true);
 
-  const [scannedAreas, setScannedAreas] = useState([
-    { id: 1, team: 'Team Alpha', time: '14:00 - 15:30', center: [32.825, 34.98], radius: 600 },
-    { id: 2, team: 'Team Bravo', time: '14:30 - 16:00', center: [32.83, 34.97], radius: 500 },
-  ]);
+  const [scannedAreas, setScannedAreas] = useState([]);
 
   const [showScanForm, setShowScanForm] = useState(false);
   const [isSelectingLocation, setIsSelectingLocation] = useState(false);
@@ -148,7 +145,7 @@ export default function DriftHeatmap() {
 
         <div className="p-4 border-b border-[#E2E8F0]">
           <h3 className="text-sm font-semibold text-[#0F172A] mb-3">Probability Distribution</h3>
-          <div className="flex h-3 w-full bg-gradient-to-r from-yellow-400 via-orange-500 to-red-600 rounded-sm mb-2"></div>
+          <div className="flex h-3 w-full rounded-sm mb-2" style={{ background: 'linear-gradient(to right, blue, lime, orange, red)' }}></div>
           <div className="flex justify-between text-xs text-[#64748B] mb-2 font-medium">
             <span>Low</span>
             <span>Medium</span>

@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useIncident } from '../context/IncidentContext';
 import { MapContainer, TileLayer, Marker, Polyline, Tooltip, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
+import 'leaflet.heat';
 
 // Reusing same icon for LSP
 const lspIcon = new L.Icon({
@@ -31,6 +32,47 @@ const generateMockPath = (startPos, teamIndex) => {
   return path;
 };
 
+function HeatmapLayer({ points }) {
+  const map = useMap();
+  React.useEffect(() => {
+    if (!points || points.length === 0) return;
+    const heat = L.heatLayer(points, {
+      radius: 18,
+      blur: 18,
+      maxZoom: 13,
+      gradient: { 0.2: 'blue', 0.4: 'lime', 0.6: 'orange', 1.0: 'red' }
+    }).addTo(map);
+    return () => {
+      map.removeLayer(heat);
+    };
+  }, [map, points]);
+  return null;
+}
+
+function generateHeatmapPoints(timeOffset) {
+  const points = [];
+  const count = 1500;
+  const cLat = 32.85 + (timeOffset * 0.0003);
+  const cLng = 34.95 + (timeOffset * 0.0001);
+  const spread = 0.01 + (timeOffset * 0.0005);
+  
+  for(let i=0; i<count; i++) {
+    const u1 = Math.random() || 0.001;
+    const u2 = Math.random() || 0.001;
+    const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+    const z1 = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
+    
+    const intensity = Math.random() * 0.8 + 0.2;
+    
+    points.push([
+      cLat + z0 * spread,
+      cLng + z1 * spread,
+      intensity
+    ]);
+  }
+  return points;
+}
+
 const TEAM_COLORS = ['#3b82f6', '#f97316', '#22c55e', '#a855f7', '#ec4899']; // blue, orange, green, purple, pink
 
 export default function SearchPlan() {
@@ -51,6 +93,9 @@ export default function SearchPlan() {
   const mapCenter = (incidentData.lat && incidentData.lng) 
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)] 
     : [32.82, 34.99];
+
+  // We use a fixed timeOffset of 12h for the search plan heatmap preview
+  const heatmapPoints = React.useMemo(() => generateHeatmapPoints(12), []);
 
   const handleGenerate = () => {
     setIsComputing(true);
@@ -194,10 +239,7 @@ export default function SearchPlan() {
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
           
-          {/* Faded background heatmap mockup */}
-          <Circle center={[mapCenter[0] + 0.02, mapCenter[1] - 0.02]} radius={1500} pathOptions={{ color: 'transparent', fillColor: '#ef4444', fillOpacity: 0.15 }} />
-          <Circle center={[mapCenter[0] + 0.03, mapCenter[1] - 0.03]} radius={2500} pathOptions={{ color: 'transparent', fillColor: '#f97316', fillOpacity: 0.1 }} />
-          <Circle center={[mapCenter[0] + 0.04, mapCenter[1] - 0.04]} radius={4000} pathOptions={{ color: 'transparent', fillColor: '#facc15', fillOpacity: 0.05 }} />
+          <HeatmapLayer points={heatmapPoints} />
 
           {/* LSP Marker */}
           <Marker position={mapCenter} icon={lspIcon}>
