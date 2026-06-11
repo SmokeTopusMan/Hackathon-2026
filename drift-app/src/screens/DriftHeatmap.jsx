@@ -14,20 +14,20 @@ const customIcon = new L.Icon({
   shadowSize: [41, 41]
 });
 
-function HeatmapLayer({ points }) {
+function HeatmapLayer({ points, gradient, radius = 18, blur = 18 }) {
   const map = useMap();
   React.useEffect(() => {
     if (!points || points.length === 0) return;
     const heat = L.heatLayer(points, {
-      radius: 18,
-      blur: 18,
+      radius,
+      blur,
       maxZoom: 13,
-      gradient: { 0.2: 'blue', 0.4: 'lime', 0.6: 'orange', 1.0: 'red' }
+      gradient: gradient || { 0.2: 'blue', 0.4: 'lime', 0.6: 'orange', 1.0: 'red' }
     }).addTo(map);
     return () => {
       map.removeLayer(heat);
     };
-  }, [map, points]);
+  }, [map, points, gradient, radius, blur]);
   return null;
 }
 
@@ -95,6 +95,7 @@ export default function DriftHeatmap() {
   const [timeOffset, setTimeOffset] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [showScanned, setShowScanned] = useState(true);
+  const [showShore, setShowShore] = useState(true);
 
   // keep the slider within the available frames once data loads
   React.useEffect(() => {
@@ -144,6 +145,9 @@ export default function DriftHeatmap() {
   };
 
   const heatmapPoints = useMemo(() => frame?.points ?? [], [frame]);
+  // beached-body locations, accumulated up to this hour (carried forward by the sim)
+  const shorePoints = useMemo(
+    () => (frame?.shore ?? []).map(([la, lo]) => [la, lo, 0.8]), [frame]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -319,6 +323,16 @@ export default function DriftHeatmap() {
           {/* Realistic Heatmap */}
           {showHeatmap && <HeatmapLayer points={heatmapPoints} />}
 
+          {/* Beached bodies (stranded on shore) — distinct dark/brown layer */}
+          {showShore && (
+            <HeatmapLayer
+              points={shorePoints}
+              gradient={{ 0.2: '#fbbf24', 0.5: '#b45309', 1.0: '#1c1917' }}
+              radius={12}
+              blur={9}
+            />
+          )}
+
           <MapTooltip />
         </MapContainer>
 
@@ -330,11 +344,18 @@ export default function DriftHeatmap() {
           >
             Heatmap: {showHeatmap ? 'ON' : 'OFF'}
           </button>
-          <button 
+          <button
             onClick={() => setShowScanned(!showScanned)}
             className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showScanned ? 'bg-white border-[#22c55e] text-[#15803d]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
           >
             Scans: {showScanned ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={() => setShowShore(!showShore)}
+            title="Bodies washed ashore (stranded particles), accumulated over time"
+            className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showShore ? 'bg-white border-[#92400e] text-[#92400e]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
+          >
+            Shore: {showShore ? 'ON' : 'OFF'}
           </button>
         </div>
       </div>

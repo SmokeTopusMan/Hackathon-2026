@@ -45,6 +45,35 @@ function dedupe(waypoints) {
     p[0] !== waypoints[i - 1][0] || p[1] !== waypoints[i - 1][1]);
 }
 
+// small text label for the reference grid (row letters / column numbers)
+function gridLabelIcon(text) {
+  return L.divIcon({
+    className: 'ref-grid-label',
+    html: `<div style="font:700 11px system-ui;color:#334155;text-shadow:0 0 2px #fff,0 0 2px #fff">${text}</div>`,
+    iconSize: [16, 16], iconAnchor: [8, 8],
+  });
+}
+
+// the coarse labelled "comms" grid (rows A,B,C.. from north, cols 1,2,3.. west)
+function ReferenceGrid({ grid }) {
+  if (!grid) return null;
+  const xs = grid.lon_edges, ys = grid.lat_edges;        // ys: north -> south
+  const top = ys[0], bot = ys[ys.length - 1], left = xs[0], right = xs[xs.length - 1];
+  const opts = { color: '#334155', weight: 0.8, opacity: 0.4 };
+  return (
+    <>
+      {xs.map((x, i) => <Polyline key={`v${i}`} positions={[[top, x], [bot, x]]} pathOptions={opts} interactive={false} />)}
+      {ys.map((y, i) => <Polyline key={`h${i}`} positions={[[y, left], [y, right]]} pathOptions={opts} interactive={false} />)}
+      {grid.row_labels.map((lab, i) => (
+        <Marker key={`r${i}`} position={[(ys[i] + ys[i + 1]) / 2, left]} icon={gridLabelIcon(lab)} interactive={false} />
+      ))}
+      {grid.col_labels.map((lab, j) => (
+        <Marker key={`c${j}`} position={[top, (xs[j] + xs[j + 1]) / 2]} icon={gridLabelIcon(lab)} interactive={false} />
+      ))}
+    </>
+  );
+}
+
 export default function SearchPlan() {
   const navigate = useNavigate();
   const { incidentData, driftData, setDriftData, currentHour, setCurrentHour, fetchPlanForHour } = useIncident();
@@ -141,12 +170,13 @@ export default function SearchPlan() {
           <div className="space-y-2 text-sm">
             <div className="flex justify-between"><span className="text-[#64748B]">Teams</span><span className="font-semibold">{plan ? plan.teams.length : '–'}</span></div>
             <div className="flex justify-between"><span className="text-[#64748B]">Sonar radius</span><span className="font-semibold">{plan ? `${plan.sonar_radius_m} m` : '–'}</span></div>
-            <div className="flex justify-between"><span className="text-[#64748B]">Planning horizon</span><span className="font-semibold">{plan ? `${plan.horizon} steps` : '–'}</span></div>
+            <div className="flex justify-between"><span className="text-[#64748B]">Grid cell</span><span className="font-semibold">{plan ? `${plan.grid_m} m` : '–'}</span></div>
+            <div className="flex justify-between"><span className="text-[#64748B]">Mission time</span><span className="font-semibold">{plan ? `${plan.mission_time_min} min` : '–'}</span></div>
+            <div className="flex justify-between"><span className="text-[#64748B]">Converged</span><span className="font-semibold">{plan ? (plan.stop_reason || '–').replace('_', ' ') : '–'}</span></div>
           </div>
           <p className="text-[11px] text-[#64748B] italic mt-3">
-            Team count / sonar / horizon come from the simulation
-            (<span className="font-mono">sim_drowned_body.py</span> or
-            <span className="font-mono"> incident.json</span>).
+            Runs until coverage converges (target {plan ? plan.coverage_target_pct : 95}%),
+            not a fixed step count. Team count / sonar from the simulation.
           </p>
 
           {planLoading && (
@@ -164,7 +194,7 @@ export default function SearchPlan() {
           <div className="p-6 bg-[#F8F9FA] flex-1">
             <div className="bg-teal-50 border border-teal-200 p-4 mb-6">
               <p className="text-center font-bold text-teal-900 text-lg">
-                Probability cleared in {plan.horizon} steps: {plan.total_cleared_pct}%
+                Probability cleared in {plan.mission_time_min} min: {plan.total_cleared_pct}%
               </p>
             </div>
 
@@ -173,9 +203,9 @@ export default function SearchPlan() {
               <table className="w-full text-left">
                 <thead className="bg-gray-50 border-b border-[#E2E8F0]">
                   <tr>
-                    <th className="p-2 font-medium text-[#64748B]">Team</th>
-                    <th className="p-2 font-medium text-[#64748B]">Waypts</th>
+                    <th className="p-2 font-medium text-[#64748B]">Craft</th>
                     <th className="p-2 font-medium text-[#64748B]">Dist</th>
+                    <th className="p-2 font-medium text-[#64748B]">Time</th>
                     <th className="p-2 font-medium text-[#64748B]">Cleared</th>
                   </tr>
                 </thead>
@@ -184,17 +214,17 @@ export default function SearchPlan() {
                     <tr key={i}>
                       <td className="p-2 flex items-center gap-2">
                         <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.color }}></div>
-                        Team {t.team}
+                        {t.team}{t.start_cell ? ` · ${t.start_cell}` : ''}
                       </td>
-                      <td className="p-2">{dedupe(t.waypoints).length}</td>
-                      <td className="p-2">{pathKm(t.waypoints).toFixed(1)} km</td>
+                      <td className="p-2">{t.distance_km ?? pathKm(t.waypoints).toFixed(1)} km</td>
+                      <td className="p-2">{t.time_min != null ? `${t.time_min} min` : '–'}</td>
                       <td className="p-2">{t.cleared_pct}%</td>
                     </tr>
                   ))}
                   <tr className="bg-gray-50 font-bold text-[#0F172A]">
                     <td className="p-2">TOTAL</td>
-                    <td className="p-2">{teams.reduce((s, t) => s + dedupe(t.waypoints).length, 0)}</td>
-                    <td className="p-2">~{totalKm.toFixed(1)} km</td>
+                    <td className="p-2">~{teams.reduce((s, t) => s + (t.distance_km ?? 0), 0).toFixed(1)} km</td>
+                    <td className="p-2">{plan.mission_time_min} min</td>
                     <td className="p-2">{plan.total_cleared_pct}%</td>
                   </tr>
                 </tbody>
@@ -234,6 +264,9 @@ export default function SearchPlan() {
 
           <HeatmapLayer points={heatmapPoints} />
 
+          {/* coarse labelled comms grid (A,B,C.. / 1,2,3..) for the teams */}
+          <ReferenceGrid grid={plan?.reference_grid} />
+
           {/* LKP marker = the coordinates entered in the Incident Report */}
           <Marker position={mapCenter} icon={lspIcon}>
             <Tooltip permanent direction="top" offset={[0, -30]} className="font-bold">LKP</Tooltip>
@@ -252,7 +285,7 @@ export default function SearchPlan() {
                 <CircleMarker center={full[0]} radius={7}
                   pathOptions={{ color: t.color, fillColor: t.color, fillOpacity: 1, weight: 2 }}>
                   <Tooltip direction="right" offset={[8, 0]} className="text-xs">
-                    <div className="font-bold">Team {t.team} — shore launch</div>
+                    <div className="font-bold">{t.team} — launch{t.start_cell ? ` (${t.start_cell})` : ''}</div>
                   </Tooltip>
                 </CircleMarker>
                 {/* current sonar sweep at the head of the path */}
@@ -263,8 +296,8 @@ export default function SearchPlan() {
                 <CircleMarker center={head} radius={5}
                   pathOptions={{ color: t.color, fillColor: 'white', fillOpacity: 1, weight: 2 }}>
                   <Tooltip direction="right" offset={[8, 0]} className="text-xs">
-                    <div className="font-bold">Team {t.team}</div>
-                    <div>Est. time: T+{(shown.length - 1) * 15}min</div>
+                    <div className="font-bold">{t.team}</div>
+                    <div>Elapsed: +{Math.round((shown.length - 1) * (plan?.tick_seconds ?? 20) / 60)} min</div>
                   </Tooltip>
                 </CircleMarker>
               </React.Fragment>
@@ -293,7 +326,7 @@ export default function SearchPlan() {
               {teams.map((t, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm font-medium text-[#0F172A]">
                   <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.color }}></div>
-                  Team {t.team} — {t.cleared_pct}%
+                  {t.team} — {t.cleared_pct}%
                 </div>
               ))}
             </div>

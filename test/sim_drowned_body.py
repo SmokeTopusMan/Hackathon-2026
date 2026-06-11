@@ -38,7 +38,8 @@ from opendrift.readers import reader_netCDF_CF_generic
 from core.drowned_drift import (
     DrownedBodyDrift, refloat_time_seconds, drown_delay_seconds, body_dynamics,
     SURFACE_EPS)
-from core.search_planner import Agent, CoveragePlanner
+from core.search_planner import (
+    Agent, CoveragePlanner, make_reference_grid, reference_cell_label)
 
 OUTDIR = os.path.join(HERE, 'output')
 os.makedirs(OUTDIR, exist_ok=True)
@@ -148,14 +149,32 @@ APP_MAX_PARTICLES = 1500   # particles per frame in the JSON (keeps the file lig
 # The plan is drawn on the heatmap PNG and exported into drift_data.json so the
 # React Search-Plan screen renders the REAL paths instead of mock ones.
 PLAN_HOUR        = 24      # which forecast hour's heatmap to plan the search on
-PLAN_GRID_M      = 200     # planning grid cell size (finer than the display grid)
-PLAN_TEAMS       = 3       # number of rescue teams (agents)
-PLAN_SONAR_M     = 400     # sonar sweep radius per team (m)
-PLAN_SPEED_CELLS = 2       # grid cells a team advances per planning tick
-PLAN_HORIZON     = 30      # number of planning time-steps T
-PLAN_DISPERSION  = 0.4     # 0..1: how strongly teams keep apart to cover more
-                           # ground (0 = pure probability-greedy). ~0.3-0.5 spreads
-                           # the routes without giving up real coverage.
+# --- algorithm grid: FINE cells over the high-probability CORE -------------
+# We plan on a small, fine grid focused on the dense core of the cloud (not the
+# whole multi-km drift), so routes are realistic boat tracks instead of coarse
+# jumps. A literal 3 m grid over a big box is millions of cells, so the cell
+# auto-grows if the core would exceed PLAN_MAX_CELLS per side.
+PLAN_GRID_M      = 3       # target algorithm cell size (m)
+PLAN_MAX_CELLS   = 600     # cap on cells/side (cell grows past 3 m if needed)
+PLAN_CORE_FRAC   = 0.95    # plan over the box holding this much probability mass
+# --- rescue fleet: real vehicle speeds drive time AND route ----------------
+PLAN_TEAMS       = 3       # number of rescue craft
+PLAN_SONAR_M     = 80      # detection radius per craft (sonar/lookout swath, m)
+PLAN_BOAT_MPS    = 7.0     # search boat   (~13 kn)
+PLAN_JETSKI_MPS  = 14.0    # jet-ski       (~27 kn)
+# fleet cycled across the teams: (label, speed m/s). Faster craft cover more.
+PLAN_FLEET       = [('Boat', PLAN_BOAT_MPS), ('Jetski', PLAN_JETSKI_MPS)]
+# --- convergence (replaces a fixed step horizon) ---------------------------
+PLAN_TICK_SEC     = 20.0   # wall-clock seconds per planning tick
+PLAN_COVERAGE     = 0.95   # stop once this fraction of probability is cleared ...
+PLAN_MAX_TIME_MIN = 90.0   # ... but never search longer than this
+PLAN_DISPERSION   = 0.25   # 0..1: how strongly teams keep apart to cover more
+                           # ground (0 = pure probability-greedy)
+# --- reference ("comms") grid drawn on the map -----------------------------
+# Coarse labelled grid (rows A,B,C.. from north, cols 1,2,3.. from west) that
+# auto-fits the search area, giving teams a shared "B-4" language. Bigger cells
+# than the algorithm grid.
+REFGRID_CELL_M    = 500    # target reference-cell size (m); auto-fits the area
 # team colours match the React SearchPlan TEAM_COLORS palette
 PLAN_COLORS      = ['#3b82f6', '#f97316', '#22c55e', '#a855f7', '#ec4899']
 
@@ -190,7 +209,7 @@ def apply_incident(inc):
         return
     global LKP_LAT, LKP_LON, BODY_HEIGHT_M, BODY_WEIGHT_KG, SEARCH_TIME
     global RUN_DURATION, N_PARTICLES, WATER_TEMP_C
-    global PLAN_TEAMS, PLAN_SONAR_M, PLAN_SPEED_CELLS, PLAN_HORIZON, PLAN_HOUR
+    global PLAN_TEAMS, PLAN_SONAR_M, PLAN_HOUR, PLAN_COVERAGE
 
     if inc.get('lat') not in (None, ''):
         LKP_LAT = float(inc['lat'])
@@ -209,7 +228,6 @@ def apply_incident(inc):
     if inc.get('durationHours') not in (None, ''):
         RUN_DURATION = timedelta(hours=float(inc['durationHours']))
     for key, g in (('teams', 'PLAN_TEAMS'), ('sonarRadius', 'PLAN_SONAR_M'),
-                   ('speed', 'PLAN_SPEED_CELLS'), ('horizon', 'PLAN_HORIZON'),
                    ('planHour', 'PLAN_HOUR'), ('nParticles', 'N_PARTICLES')):
         if inc.get(key) not in (None, ''):
             globals()[g] = type(globals()[g])(inc[key])
@@ -528,26 +546,44 @@ def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
     ds = xr.open_dataset(ncfile)
     lon = ds['lon'].values            # (trajectory, time)
     lat = ds['lat'].values
+    status = ds['status'].values      # 0 = active, 1 = stranded (beached on shore)
     times = ds['time'].values
     ds.close()
     ntraj, ntime = lon.shape
 
     step = max(1, ntraj // max_particles)
     sel = np.arange(0, ntraj, step)
+    lon_s, lat_s, status_s = lon[sel], lat[sel], status[sel]
 
     _, p_afloat, p_sub, p_strand = state_probabilities(ncfile)
 
+    # SHORE landings: many real cases end with the body washed ashore. A stranded
+    # particle is deactivated (NaN) afterwards, so it would vanish from the heat-
+    # map -- we capture WHERE and WHEN each one beached and carry it forward, so
+    # the shore hot-spots persist and accumulate over time.
+    stranded_ever = (status_s == 1)
+    has_strand = stranded_ever.any(axis=1)
+    strand_step = np.where(has_strand, np.argmax(stranded_ever, axis=1), -1)
+    si = np.where(has_strand)[0]
+    shore_la = [round(float(lat_s[i, strand_step[i]]), 5) for i in si]
+    shore_lo = [round(float(lon_s[i, strand_step[i]]), 5) for i in si]
+    shore_step = [int(strand_step[i]) for i in si]
+
     frames = []
     for t in range(ntime):
-        la = lat[sel, t]
-        lo = lon[sel, t]
+        la = lat_s[:, t]
+        lo = lon_s[:, t]
         good = np.isfinite(la) & np.isfinite(lo)
         pts = [[round(float(a), 5), round(float(o), 5), intensity]
                for a, o in zip(la[good], lo[good])]
+        # every particle beached at or before this hour, at its landing point
+        shore = [[shore_la[k], shore_lo[k]]
+                 for k in range(len(si)) if shore_step[k] <= t]
         frames.append({
             'hour': int(round((times[t] - times[0]) / np.timedelta64(1, 'h'))),
             'label': np.datetime_as_string(times[t], unit='m').replace('T', ' '),
             'points': pts,
+            'shore': shore,                                  # beached-body locations
             'afloat': round(float(p_afloat[t]) * 100, 1),
             'submerged': round(float(p_sub[t]) * 100, 1),
             'stranded': round(float(p_strand[t]) * 100, 1),
@@ -571,13 +607,15 @@ def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
 
 
 def _plan_prob_grid(ncfile, hour=PLAN_HOUR, cell_m=PLAN_GRID_M):
-    """Probability heatmap (as a dense grid) of the body's location at forecast
-    `hour`, built from the particle cloud at that frame. Returns
-    (prob, xe, ye, hour) where prob[row=lat, col=lon] sums to 1 and xe/ye are
-    the cell EDGES in lon/lat so grid cells map back to real coordinates.
+    """Fine probability grid of the body's location at forecast `hour`, focused
+    on the high-probability CORE of the cloud. Returns
+    (prob, xe, ye, hour, cell_m_used): prob[row=lat, col=lon] sums to 1, xe/ye
+    are the cell EDGES in lon/lat, and cell_m_used is the actual cell size (it
+    grows past PLAN_GRID_M only if the core box would exceed PLAN_MAX_CELLS/side).
 
-    The grid extent is stretched east to the coastline (~35.05 E) so the SHORE
-    is inside the grid -- the planner launches teams from there."""
+    We crop to the box holding PLAN_CORE_FRAC of the probability mass (dropping
+    the long thin drift tails) so a ~3 m grid stays small and the routes don't
+    sprawl over the whole region."""
     ds = xr.open_dataset(ncfile)
     lon = ds['lon'].values
     lat = ds['lat'].values
@@ -591,14 +629,28 @@ def _plan_prob_grid(ncfile, hour=PLAN_HOUR, cell_m=PLAN_GRID_M):
     good = np.isfinite(la) & np.isfinite(lo)
     la, lo = la[good], lo[good]
 
-    pad = 0.01
-    extent = [min(lo.min(), LKP_LON) - pad, max(lo.max(), LKP_LON) + pad,
-              min(la.min(), LKP_LAT) - pad, max(la.max(), LKP_LAT) + pad]
-    extent[1] = max(extent[1], 35.05)            # reach the shore
-    counts, xe, ye = _count_grid(lo, la, extent, cell_m, sigma=1)
+    # focus on the dense CORE: drop the (1 - PLAN_CORE_FRAC) tail on each side
+    q = (1.0 - PLAN_CORE_FRAC) / 2.0
+    lo0, lo1 = np.quantile(lo, [q, 1 - q])
+    la0, la1 = np.quantile(la, [q, 1 - q])
+    midlat = 0.5 * (la0 + la1)
+    # pad so teams can sweep a sonar width past the edge of the mass
+    pad_lon = 2 * PLAN_SONAR_M / (111_320.0 * np.cos(np.radians(midlat)))
+    pad_lat = 2 * PLAN_SONAR_M / 110_540.0
+    extent = [lo0 - pad_lon, lo1 + pad_lon, la0 - pad_lat, la1 + pad_lat]
+
+    # pick the cell size: target PLAN_GRID_M but cap cells/side
+    width_m = (extent[1] - extent[0]) * 111_320.0 * np.cos(np.radians(midlat))
+    height_m = (extent[3] - extent[2]) * 110_540.0
+    cell = float(cell_m)
+    side = max(width_m, height_m) / cell
+    if side > PLAN_MAX_CELLS:
+        cell *= side / PLAN_MAX_CELLS            # auto-coarsen to stay tractable
+
+    counts, xe, ye = _count_grid(lo, la, extent, cell, sigma=1)
     total = counts.sum()
     prob = counts / total if total else counts
-    return prob, xe, ye, int(round(hours[t]))
+    return prob, xe, ye, int(round(hours[t])), cell
 
 
 def _water_mask(xe, ye):
@@ -668,7 +720,7 @@ def plan_search(ncfile, hour=None):
     serialisable plan dict plus the raw planner result and grid for plotting."""
     if hour is None:
         hour = PLAN_HOUR
-    prob, xe, ye, hour = _plan_prob_grid(ncfile, hour=hour)
+    prob, xe, ye, hour, cell_m = _plan_prob_grid(ncfile, hour=hour)
     ny, nx = prob.shape
 
     # water-only navigation: agents can't cross land, and land cells hold no
@@ -678,44 +730,64 @@ def plan_search(ncfile, hour=None):
     if prob.sum():
         prob = prob / prob.sum()
 
-    # sonar radius (m) -> grid cells (>=1 so a sweep always covers neighbours)
-    sonar_cells = max(1, int(round(PLAN_SONAR_M / PLAN_GRID_M)))
-    # teams put to sea from the nearest shore points to the probability mass
+    # teams put to sea from the points nearest the probability mass
     starts = _shore_launch_cells(water, prob, PLAN_TEAMS)
 
-    agents = [Agent(starts[i], speed=PLAN_SPEED_CELLS, sonar_radius=sonar_cells,
-                    name=chr(65 + i), color=PLAN_COLORS[i % len(PLAN_COLORS)])
-              for i in range(PLAN_TEAMS)]
-    planner = CoveragePlanner(prob, agents, horizon=PLAN_HORIZON,
+    # heterogeneous fleet: real boat/jet-ski speeds (m/s) and a metre sonar swath
+    agents = []
+    for i in range(PLAN_TEAMS):
+        label, speed = PLAN_FLEET[i % len(PLAN_FLEET)]
+        agents.append(Agent(starts[i], speed_mps=speed, sonar_radius_m=PLAN_SONAR_M,
+                            name=f"{label} {i + 1}",
+                            color=PLAN_COLORS[i % len(PLAN_COLORS)]))
+    planner = CoveragePlanner(prob, agents, cell_m=cell_m,
+                              tick_seconds=PLAN_TICK_SEC,
+                              coverage_target=PLAN_COVERAGE,
+                              max_time_s=PLAN_MAX_TIME_MIN * 60.0,
                               connectivity=8, passable=water,
                               dispersion=PLAN_DISPERSION)
     res = planner.plan()
+
+    # coarse labelled comms grid over the search area
+    refgrid = make_reference_grid(
+        [float(xe[0]), float(xe[-1]), float(ye[0]), float(ye[-1])],
+        target_cell_m=REFGRID_CELL_M)
 
     teams = []
     for a in agents:
         waypoints = [[round(lat, 5), round(lon, 5)]              # -> [lat, lon]
                      for (r, c) in a.path
                      for (lon, lat) in [_cell_to_lonlat(r, c, xe, ye)]]
+        s_lon, s_lat = _cell_to_lonlat(a.path[0][0], a.path[0][1], xe, ye)
         teams.append({
             'team': a.name, 'color': a.color,
-            'speed': a.speed, 'sonar_radius_m': PLAN_SONAR_M,
+            'speed_mps': round(a.speed_mps, 1),
+            'sonar_radius_m': PLAN_SONAR_M,
             'cleared_pct': round(a.cleared_prob * 100, 1),
+            'distance_km': round(a.distance_m / 1000.0, 2),
+            'time_min': round(a.time_s / 60.0, 1),
+            'start_cell': reference_cell_label(refgrid, s_lon, s_lat),
             'waypoints': waypoints,
         })
 
     plan = {
         'plan_hour': hour,
-        'grid_m': PLAN_GRID_M,
-        'horizon': PLAN_HORIZON,
+        'grid_m': round(cell_m, 1),
         'sonar_radius_m': PLAN_SONAR_M,
+        'tick_seconds': PLAN_TICK_SEC,
+        'ticks': res['ticks'],
+        'mission_time_min': round(res['mission_time_s'] / 60.0, 1),
+        'stop_reason': res['stop_reason'],
+        'coverage_target_pct': round(PLAN_COVERAGE * 100),
         'total_cleared_pct': round(res['cleared_fraction'] * 100, 1),
         'coverage_over_time': [round(float(x) * 100, 1)
                                for x in res['coverage_over_time']],
+        'reference_grid': refgrid,
         'teams': teams,
     }
-    print(f"  search plan: {PLAN_TEAMS} teams, T={PLAN_HORIZON}, "
-          f"sonar {PLAN_SONAR_M} m -> {plan['total_cleared_pct']:.1f}% "
-          f"probability cleared (plan hour {hour})")
+    print(f"  search plan: {PLAN_TEAMS} craft @ {cell_m:.0f} m grid -> "
+          f"{plan['total_cleared_pct']:.1f}% cleared in {plan['mission_time_min']:.0f} min "
+          f"({res['stop_reason']}, plan hour {hour})")
     return plan, res, prob, xe, ye
 
 
@@ -739,11 +811,32 @@ def make_search_plan_map(plan, prob, xe, ye):
     ax.pcolormesh(xe, ye, Hm, transform=proj, cmap='inferno', alpha=0.7,
                   zorder=3, shading='flat')
 
+    # reference ("comms") grid: rows A,B,C.. from the north, cols 1,2,3.. west
+    rg = plan.get('reference_grid')
+    if rg:
+        lon_e, lat_e = rg['lon_edges'], rg['lat_edges']     # lat_e: north->south
+        for x in lon_e:
+            ax.plot([x, x], [lat_e[-1], lat_e[0]], color='#334155',
+                    lw=0.6, alpha=0.45, zorder=4, transform=proj)
+        for y in lat_e:
+            ax.plot([lon_e[0], lon_e[-1]], [y, y], color='#334155',
+                    lw=0.6, alpha=0.45, zorder=4, transform=proj)
+        for i, lab in enumerate(rg['row_labels']):          # row letters (left)
+            yc = 0.5 * (lat_e[i] + lat_e[i + 1])
+            ax.text(lon_e[0], yc, lab, color='#334155', fontsize=8, weight='bold',
+                    ha='right', va='center', zorder=8, transform=proj)
+        for j, lab in enumerate(rg['col_labels']):          # col numbers (top)
+            xc = 0.5 * (lon_e[j] + lon_e[j + 1])
+            ax.text(xc, lat_e[0], lab, color='#334155', fontsize=8, weight='bold',
+                    ha='center', va='bottom', zorder=8, transform=proj)
+
     for tm in plan['teams']:
         lats = [p[0] for p in tm['waypoints']]
         lons = [p[1] for p in tm['waypoints']]
-        ax.plot(lons, lats, '-o', color=tm['color'], ms=3, lw=1.8, zorder=5,
-                transform=proj, label=f"Team {tm['team']} ({tm['cleared_pct']}%)")
+        ax.plot(lons, lats, '-o', color=tm['color'], ms=2, lw=1.8, zorder=5,
+                transform=proj,
+                label=f"{tm['team']} ({tm['cleared_pct']}%, "
+                      f"{tm['distance_km']} km / {tm['time_min']} min)")
         ax.plot(lons[0], lats[0], marker='s', color=tm['color'], ms=9,
                 mec='black', zorder=6, transform=proj)
     ax.plot(LKP_LON, LKP_LAT, marker='*', color='cyan', ms=18, mec='black',
@@ -751,9 +844,10 @@ def make_search_plan_map(plan, prob, xe, ye):
 
     gl = ax.gridlines(draw_labels=True, alpha=0.3)
     gl.top_labels = gl.right_labels = False
-    ax.legend(loc='upper right', fontsize=9)
+    ax.legend(loc='upper right', fontsize=8)
     ax.set_title(f"Coordinated search plan @ T+{plan['plan_hour']}h  "
-                 f"({PLAN_TEAMS} teams, {plan['total_cleared_pct']}% cleared)")
+                 f"({PLAN_TEAMS} craft, {plan['total_cleared_pct']}% cleared in "
+                 f"{plan['mission_time_min']:.0f} min)")
     out = os.path.join(OUTDIR, 'search_plan_map.png')
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
