@@ -64,9 +64,15 @@ function MapClickHandler({ onMapClick }) {
 
 export default function DriftHeatmap() {
   const navigate = useNavigate();
-  const { incidentData, driftData, setDriftData, setCurrentHour } = useIncident();
+  const { incidentData, driftData, setDriftData, setCurrentHour, setRunState } = useIncident();
 
   const [loadError, setLoadError] = useState(null);
+
+  // We've arrived at the results -> clear the run's `done` flag so navigating
+  // back to the Incident Report later isn't instantly redirected here again.
+  React.useEffect(() => {
+    setRunState((s) => (s.done ? { ...s, done: false } : s));
+  }, [setRunState]);
 
   // Prefer the live result from the run we just triggered (context). If we
   // landed here without a run, pull the latest from the API, then fall back to

@@ -10,5 +10,11 @@ export default defineConfig({
     proxy: {
       '/api': 'http://localhost:5000',
     },
+    // Never full-reload the app because a generated data file changed. (The sim
+    // now writes to test/output/ — outside this tree — but keep this as a guard
+    // so a stray write into public/ can't wipe React state mid-run.)
+    watch: {
+      ignored: ['**/public/drift_data.json', '**/public/incident.json'],
+    },
   },
 })

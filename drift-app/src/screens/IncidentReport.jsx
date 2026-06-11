@@ -33,27 +33,19 @@ function MapClickHandler({ setPos }) {
 
 export default function IncidentReport() {
   const navigate = useNavigate();
-  const { incidentData, updateIncident, runSimulation, runState, setRunState } = useIncident();
+  const { incidentData, updateIncident, runSimulation, runState } = useIncident();
   const [mapPos, setMapPos] = useState(incidentData.lat && incidentData.lng ? { lat: incidentData.lat, lng: incidentData.lng } : null);
 
-  // Submit -> run the drift simulation LIVE on these inputs, show a loading bar,
-  // then go to the Search Plan screen (heatmap + the algorithm running on it).
+  // "Run Simulation" -> run the drift sim LIVE on these inputs and show the
+  // progress bar. The "Continue" button stays disabled until runState.done,
+  // then the user clicks it to go to the heatmap (navigation in a direct click
+  // handler is the most reliable kind).
   const handleSubmit = (e) => {
     e.preventDefault();
-    runSimulation(incidentData)
-      .then(() => navigate('/heatmap'))
-      .catch(() => { /* failure surfaced via runState.error in the overlay */ });
+    runSimulation(incidentData).catch(() => {
+      /* failure surfaced inline next to the buttons */
+    });
   };
-
-  // Backup navigation: the moment a run signals done, move to the results
-  // (the heatmap screen — confirmed-working — shows the new simulation).
-  // Driven by the `done` flag so it never depends on promise timing.
-  React.useEffect(() => {
-    if (runState.done) {
-      setRunState((s) => ({ ...s, done: false }));   // consume the flag
-      navigate('/heatmap');
-    }
-  }, [runState.done, navigate, setRunState]);
 
   const handleMapClick = (pos) => {
     setMapPos(pos);
@@ -77,55 +69,6 @@ export default function IncidentReport() {
 
   return (
     <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-[#F8F9FA]">
-
-      {/* Live simulation loading overlay */}
-      {(runState.running || runState.error || runState.done) && (
-        <div className="fixed inset-0 z-[2000] bg-[#0F172A]/70 flex items-center justify-center">
-          <div className="bg-white rounded-lg shadow-2xl p-8 w-[440px] max-w-[90vw]">
-            {runState.error ? (
-              <>
-                <h3 className="text-lg font-bold text-[#DC2626] mb-2">Simulation failed</h3>
-                <p className="text-sm text-[#64748B] mb-4 break-words">{runState.error}</p>
-                <p className="text-xs text-[#64748B]">
-                  Is the backend running? Start it with
-                  <span className="font-mono"> python api/server.py</span>.
-                </p>
-              </>
-            ) : runState.done ? (
-              <>
-                <h3 className="text-lg font-bold text-[#0F766E] mb-1">✓ Simulation complete</h3>
-                <p className="text-sm text-[#64748B] mb-5">
-                  The new drift forecast and coordinated search plan are ready.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => { setRunState((s) => ({ ...s, done: false })); navigate('/heatmap'); }}
-                  className="w-full py-3 font-medium bg-[#0F766E] text-white hover:bg-[#115E59] rounded transition-colors"
-                >
-                  View drift heatmap →
-                </button>
-                <p className="text-xs text-[#64748B] mt-3 text-center">
-                  Then open <b>Search Plan</b> to watch the search algorithm run.
-                </p>
-              </>
-            ) : (
-              <>
-                <h3 className="text-lg font-bold text-[#0F172A] mb-1">Running drift simulation</h3>
-                <p className="text-sm text-[#0F766E] mb-4">{runState.stage || 'Working…'}</p>
-                <div className="w-full bg-[#E2E8F0] h-3 rounded-full overflow-hidden">
-                  <div className="bg-[#0F766E] h-full transition-all duration-500 ease-out"
-                       style={{ width: `${Math.max(3, runState.percent)}%` }}></div>
-                </div>
-                <p className="text-right text-xs text-[#64748B] mt-2 font-medium">{Math.round(runState.percent)}%</p>
-                <p className="text-[11px] text-[#94A3B8] mt-3">
-                  Forecasting body drift, sink/refloat &amp; the coordinated search plan
-                  from your inputs. This can take a few minutes with live ocean data.
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Left Column: Form */}
       <div className="w-full md:w-1/2 overflow-y-auto p-6 md:p-8 border-r border-[#E2E8F0]">
@@ -224,13 +167,45 @@ export default function IncidentReport() {
                 <div className="bg-[#0F766E] h-full transition-all duration-300" style={{ width: `${progressPercent}%` }}></div>
               </div>
             </div>
+            {/* Simulation progress (appears once you press Run Simulation) */}
+            {(runState.running || runState.done || runState.error) && (
+              <div className="mb-4">
+                {runState.error ? (
+                  <p className="text-sm text-[#DC2626]">
+                    Simulation failed: {runState.error}. Is the backend running
+                    (<span className="font-mono">python api/server.py</span>)?
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className={runState.done ? 'text-[#0F766E] font-semibold' : 'text-[#64748B]'}>
+                        {runState.done ? '✓ Simulation complete' : (runState.stage || 'Simulating…')}
+                      </span>
+                      <span className="text-[#64748B] font-medium">{Math.round(runState.percent)}%</span>
+                    </div>
+                    <div className="w-full bg-[#E2E8F0] h-2 rounded-full overflow-hidden">
+                      <div className="bg-[#0F766E] h-full transition-all duration-500 ease-out"
+                           style={{ width: `${Math.max(3, runState.percent)}%` }}></div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <div className="flex gap-4">
               <button
                 type="submit"
                 disabled={!isFormValid() || runState.running}
                 className={`flex-1 py-3 font-medium transition-colors ${(!isFormValid() || runState.running) ? 'bg-[#94A3B8] text-white cursor-not-allowed' : 'bg-[#0F766E] text-white hover:bg-[#115E59]'}`}
               >
-                {runState.running ? 'Running simulation…' : 'Run Simulation & Continue →'}
+                {runState.running ? 'Running simulation…' : 'Run Simulation'}
+              </button>
+              <button
+                type="button"
+                disabled={!runState.done}
+                onClick={() => navigate('/heatmap')}
+                className={`flex-1 py-3 font-medium transition-colors ${runState.done ? 'bg-[#0F766E] text-white hover:bg-[#115E59]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+              >
+                Continue →
               </button>
             </div>
           </div>

@@ -106,6 +106,17 @@ REFRESH_DATA      = False   # True = always re-download; False = reuse a cached 
 CURRENT_UNCERTAINTY    = 0.10   # m/s
 HORIZONTAL_DIFFUSIVITY = 10.0   # m^2/s
 
+# --- surface wind & wave (Stokes) drift ------------------------------------
+# A drowned body has NO windage while submerged, but each time it REFLOATS the
+# wind and breaking waves push it -- and that wave/wind-sea transport is what a
+# current-only model misses near shore. We add the Copernicus WAVE product's
+# Stokes drift (VSDX/VSDY); OpenDrift applies it with a depth decay, so it acts
+# on the AFLOAT phases and barely touches the submerged ones. Direct windage
+# needs a separate wind field (ERA5 for past dates / GFS for recent ones), so
+# WIND_DRIFT_FACTOR only takes effect once such a wind reader is added.
+USE_STOKES        = True    # add Copernicus wave Stokes drift (afloat phases)
+WIND_DRIFT_FACTOR = 0.0     # windage coefficient; needs a wind reader to act
+
 # --- afloat / drowned probability ------------------------------------------
 # At each of these times (hours since the LKP) we report the probability that
 # the body is AFLOAT (at the surface -> visible, wind-driftable, spottable) vs
@@ -120,9 +131,15 @@ HEATMAP_GRID_M = 300    # grid cell size in metres
 HEATMAP_SMOOTH = 0      # gaussian smoothing in cells (0 = crisp grid boxes)
 
 # --- React drift-app bridge ------------------------------------------------
-# The run also writes a JSON the drift-app map loads (drift-app/public/), with
-# one heatmap frame per output hour + afloat/submerged probabilities + the LKP.
-APP_JSON          = os.path.join(HERE, '..', 'drift-app', 'public', 'drift_data.json')
+# The run writes a JSON the drift-app map loads (one heatmap frame per output
+# hour + afloat/submerged probabilities + the LKP + the search plan).
+#
+# IMPORTANT: this MUST NOT live inside drift-app/ (e.g. public/). Vite's dev
+# server watches that tree and FULL-RELOADS the page whenever a file there
+# changes -- so writing the result mid-run reloaded the app and wiped React
+# state right as the run finished. We write it to OUTDIR (outside Vite's watch)
+# and the frontend reads it only through the /api/drift_data endpoint.
+APP_JSON          = os.path.join(OUTDIR, 'drift_data.json')
 APP_MAX_PARTICLES = 1500   # particles per frame in the JSON (keeps the file light)
 
 # --- coordinated search plan (core/search_planner.py) ----------------------
@@ -252,6 +269,38 @@ def download_currents_subset():
     return path
 
 
+def download_waves_subset():
+    """Download surface Stokes drift (VSDX/VSDY) from the Copernicus Med WAVE
+    product for the same box/time as the currents. Stokes drift is the wave-
+    driven mass transport that pushes a FLOATING body downwind; OpenDrift
+    applies it with a depth decay, so only the afloat phases feel it. Same
+    param-named cache as the currents (never overwrites a locked file)."""
+    import copernicusmarine
+    t0 = SEARCH_TIME - timedelta(hours=2)
+    t1 = SEARCH_TIME + RUN_DURATION + timedelta(hours=2)
+    key = (f"{LKP_LAT:.3f}_{LKP_LON:.3f}_{SEARCH_TIME:%Y%m%d%H}_"
+           f"{int(RUN_DURATION.total_seconds()//3600)}h_{SUBSET_MARGIN_DEG}")
+    fname = f"waves_{key}.nc"
+    path = os.path.join(OUTDIR, fname)
+    if os.path.exists(path) and not REFRESH_DATA:
+        print(f"  reusing cached waves: {fname}")
+        return path
+    print(f"  waves subset (Stokes drift) -> {fname}")
+    copernicusmarine.subset(
+        dataset_id='cmems_mod_med_wav_anfc_4.2km_PT1H-i',
+        variables=['VSDX', 'VSDY'],
+        minimum_longitude=LKP_LON - SUBSET_MARGIN_DEG,
+        maximum_longitude=LKP_LON + SUBSET_MARGIN_DEG,
+        minimum_latitude=LKP_LAT - SUBSET_MARGIN_DEG,
+        maximum_latitude=LKP_LAT + SUBSET_MARGIN_DEG,
+        start_datetime=t0.strftime('%Y-%m-%dT%H:%M:%S'),
+        end_datetime=t1.strftime('%Y-%m-%dT%H:%M:%S'),
+        output_filename=fname, output_directory=OUTDIR,
+        username=CMEMS_USER, password=CMEMS_PASS,
+        overwrite=True, disable_progress_bar=True)
+    return path
+
+
 def build_model():
     o = DrownedBodyDrift(loglevel=20)
 
@@ -290,6 +339,17 @@ def build_model():
             o.add_reader(bathy)
         except Exception as exc:
             print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
+
+        # Surface WAVE Stokes drift -> the wave/wind-sea push on the AFLOAT
+        # phases (OpenDrift decays it with depth, so the submerged phases barely
+        # feel it). VSDX/VSDY carry Stokes-drift standard_names, auto-mapped.
+        if USE_STOKES:
+            try:
+                wav_path = download_waves_subset()
+                waves = reader_netCDF_CF_generic.Reader(wav_path, name='CMEMS-waves')
+                o.add_reader(waves)
+            except Exception as exc:
+                print('  [wave Stokes unavailable, continuing without it]:', exc)
     else:
         # --- OFFLINE constant forcing --------------------------------------
         # Gentle OFFSHORE drift so the cluster stays in open water long enough
@@ -305,6 +365,7 @@ def build_model():
     o.set_config('general:seafloor_action', 'lift_to_seafloor')
     o.set_config('drift:vertical_advection', True)
     o.set_config('drift:vertical_mixing', False)
+    o.set_config('drift:stokes_drift', USE_STOKES)   # wave push on afloat phases
 
     # Gaussian noise -> realistic ensemble spread (see top of file to tune).
     o.set_config('drift:current_uncertainty', CURRENT_UNCERTAINTY)
@@ -325,6 +386,7 @@ def seed(o):
         number=N_PARTICLES, time=start, z=0,
         phase=1, phase_start_age=0,          # start in the DROWNING phase
         drown_delay=drown, refloat_time=refloat, surface_time=surface,
+        wind_drift_factor=WIND_DRIFT_FACTOR,  # windage (acts once a wind reader is added)
     )
     return o
 
