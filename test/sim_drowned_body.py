@@ -166,7 +166,7 @@ def apply_incident(inc):
     profile entered in the frontend ARE the inputs of this simulation.
 
     Recognised keys (all optional): lat, lng/lon, victimHeight (cm),
-    victimWeight (kg), date (YYYY-MM-DD), timeFrom (HH:MM), waterTemp,
+    victimWeight (kg), date (YYYY-MM-DD), time/timeFrom (HH:MM), waterTemp,
     durationHours, teams, sonarRadius (m), speed (cells/tick), horizon,
     planHour, nParticles."""
     if not inc:
@@ -187,7 +187,7 @@ def apply_incident(inc):
     if inc.get('waterTemp') not in (None, ''):
         WATER_TEMP_C = float(inc['waterTemp'])
     if inc.get('date'):
-        hhmm = (inc.get('timeFrom') or '00:00')
+        hhmm = (inc.get('time') or inc.get('timeFrom') or '00:00')
         SEARCH_TIME = datetime.strptime(f"{inc['date']} {hhmm}", '%Y-%m-%d %H:%M')
     if inc.get('durationHours') not in (None, ''):
         RUN_DURATION = timedelta(hours=float(inc['durationHours']))

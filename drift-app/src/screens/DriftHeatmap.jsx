@@ -152,7 +152,6 @@ export default function DriftHeatmap() {
               ACTIVE
             </span>
           </div>
-          <p className="text-sm text-[#0F172A] mb-1">Victim: {incidentData.victimName || 'Unknown'}</p>
           <p className="text-xs text-[#64748B]">LSP: {incidentData.lat || '--'}, {incidentData.lng || '--'}</p>
         </div>
 

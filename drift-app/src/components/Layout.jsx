@@ -1,17 +1,22 @@
 import React from 'react';
-import { Outlet, useLocation } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Waves, Eye } from 'lucide-react';
 
 const STEPS = [
   { path: '/', label: 'Incident Report' },
-  { path: '/intelligence', label: 'Intelligence' },
   { path: '/heatmap', label: 'Heatmap' },
   { path: '/search-plan', label: 'Search Plan' }
 ];
 
 export default function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
   const currentStepIndex = STEPS.findIndex(step => step.path === location.pathname);
+
+  const handleStepClick = (stepPath) => {
+    if (location.pathname === '/' && stepPath !== '/') return;
+    navigate(stepPath);
+  };
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] flex flex-col text-[#0F172A] font-sans">
@@ -29,10 +34,15 @@ export default function Layout() {
             {STEPS.map((step, index) => {
               const isCompleted = index < currentStepIndex;
               const isCurrent = index === currentStepIndex;
+              const isClickable = location.pathname !== '/' || step.path === '/';
               
               return (
                 <li key={step.path} className={`flex items-center ${index < STEPS.length - 1 ? 'flex-1' : ''}`}>
-                  <div className="flex items-center">
+                  <button 
+                    onClick={() => handleStepClick(step.path)}
+                    disabled={!isClickable}
+                    className={`flex items-center outline-none ${isClickable ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+                  >
                     <span className={`
                       flex items-center justify-center w-6 h-6 rounded-full text-xs font-semibold
                       ${isCurrent ? 'bg-[#0F766E] text-white' : 
@@ -43,7 +53,7 @@ export default function Layout() {
                     <span className={`ml-2 text-sm font-medium ${isCurrent ? 'text-[#0F172A]' : 'text-[#64748B]'}`}>
                       {step.label}
                     </span>
-                  </div>
+                  </button>
                   {index < STEPS.length - 1 && (
                     <div className={`flex-1 h-px mx-4 ${isCompleted ? 'bg-[#0F766E]/50' : 'bg-[#E2E8F0]'}`}></div>
                   )}

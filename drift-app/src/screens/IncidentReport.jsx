@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, useMapEvents, ScaleControl } from 'react-leaflet';
+import MapGrid from '../components/MapGrid';
 import { useIncident } from '../context/IncidentContext';
 import L from 'leaflet';
 
@@ -61,41 +62,17 @@ export default function IncidentReport() {
     }
   };
 
-  // Export the entered LKP + victim + time as incident.json. Dropping this file
-  // in drift-app/public/ makes the simulation (test/sim_drowned_body.py) run at
-  // THESE coordinates — i.e. the lon/lat entered here become the LKP.
-  const handleDownloadIncident = () => {
-    const incident = {
-      id: incidentData.id,
-      lat: incidentData.lat,
-      lng: incidentData.lng,
-      date: incidentData.date,
-      timeFrom: incidentData.timeFrom,
-      victimHeight: incidentData.victimHeight,   // cm
-      victimWeight: incidentData.victimWeight,   // kg
-      waterTemp: incidentData.waterTemp,
-    };
-    const blob = new Blob([JSON.stringify(incident, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'incident.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   const isFormValid = () => {
     return incidentData.date && 
-           incidentData.timeFrom && 
-           incidentData.timeTo && 
+           incidentData.time && 
            incidentData.victimHeight && 
            incidentData.victimWeight && 
            incidentData.lat && 
            incidentData.lng;
   };
 
-  const requiredFields = 7;
-  const filledFields = [incidentData.date, incidentData.timeFrom, incidentData.timeTo, incidentData.victimHeight, incidentData.victimWeight, incidentData.lat, incidentData.lng].filter(Boolean).length;
+  const requiredFields = 6;
+  const filledFields = [incidentData.date, incidentData.time, incidentData.victimHeight, incidentData.victimWeight, incidentData.lat, incidentData.lng].filter(Boolean).length;
   const progressPercent = Math.round((filledFields / requiredFields) * 100);
 
   return (
@@ -171,27 +148,10 @@ export default function IncidentReport() {
               </div>
               
               <div className="flex gap-2">
-                <div className="w-1/2">
-                  <label className="block text-sm font-medium text-[#0F172A] mb-1">Time From <span className="text-[#DC2626]">*</span></label>
-                  <input type="time" required value={incidentData.timeFrom} onChange={e => updateIncident({ timeFrom: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] focus:ring-1 focus:ring-[#0F766E] outline-none" />
+                <div className="w-full">
+                  <label className="block text-sm font-medium text-[#0F172A] mb-1">Time <span className="text-[#DC2626]">*</span></label>
+                  <input type="time" required value={incidentData.time} onChange={e => updateIncident({ time: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] focus:ring-1 focus:ring-[#0F766E] outline-none" />
                 </div>
-                <div className="w-1/2">
-                  <label className="block text-sm font-medium text-[#0F172A] mb-1">Time To <span className="text-[#DC2626]">*</span></label>
-                  <input type="time" required value={incidentData.timeTo} onChange={e => updateIncident({ timeTo: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] focus:ring-1 focus:ring-[#0F766E] outline-none" />
-                </div>
-              </div>
-
-              <div className="col-span-1 md:col-span-2">
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Water Body</label>
-                <input type="text" list="water-bodies" placeholder="e.g. Mediterranean Sea" value={incidentData.waterBody} onChange={e => updateIncident({ waterBody: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-                <datalist id="water-bodies">
-                  <option value="Mediterranean Sea" />
-                  <option value="Sea of Galilee (Kinneret)" />
-                  <option value="Dead Sea" />
-                  <option value="Red Sea (Eilat)" />
-                  <option value="Jordan River" />
-                  <option value="Other" />
-                </datalist>
               </div>
             </div>
           </section>
@@ -221,27 +181,12 @@ export default function IncidentReport() {
                 <input type="number" step="any" required placeholder="e.g. 34.99" value={incidentData.lng} onChange={e => updateIncident({ lng: e.target.value })} disabled={incidentData.lspMode === 'map'} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none disabled:bg-gray-100 disabled:text-gray-500" />
               </div>
             </div>
-
-            <div>
-              <label className="block text-sm font-medium text-[#0F172A] mb-1">Coordinate Accuracy</label>
-              <select value={incidentData.accuracy} onChange={e => updateIncident({ accuracy: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none bg-white">
-                <option>Exact</option>
-                <option>Approximate (~10m)</option>
-                <option>Approximate (~50m)</option>
-                <option>Unknown</option>
-              </select>
-            </div>
           </section>
 
           {/* Section 3: Victim Profile */}
           <section className="bg-white p-6 border border-[#E2E8F0] shadow-sm rounded-sm">
             <h2 className="text-lg font-semibold border-b border-[#E2E8F0] pb-2 mb-4 text-[#0F766E]">3. Victim Profile</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="col-span-1 md:col-span-2">
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Full Name</label>
-                <input type="text" value={incidentData.victimName} onChange={e => updateIncident({ victimName: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-              </div>
-              
               <div>
                 <label className="block text-sm font-medium text-[#0F172A] mb-1">Age</label>
                 <input type="number" min="0" value={incidentData.victimAge} onChange={e => updateIncident({ victimAge: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
@@ -265,72 +210,6 @@ export default function IncidentReport() {
                 <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Used to estimate body density and drift depth profile">Weight (kg) <span className="text-[#DC2626]">*</span> ℹ️</label>
                 <input type="number" required min="0" value={incidentData.victimWeight} onChange={e => updateIncident({ victimWeight: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
               </div>
-
-              <div className="col-span-1 md:col-span-2">
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Clothing Description</label>
-                <textarea rows="2" placeholder="e.g. red shirt, black shorts, no shoes..." value={incidentData.victimClothing} onChange={e => updateIncident({ victimClothing: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none"></textarea>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Swimming Ability</label>
-                <select value={incidentData.swimmingAbility} onChange={e => updateIncident({ swimmingAbility: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none bg-white">
-                  <option>Unknown</option>
-                  <option>Non-swimmer</option>
-                  <option>Beginner</option>
-                  <option>Intermediate</option>
-                  <option>Strong swimmer</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Physical Condition</label>
-                <select value={incidentData.physicalCondition} onChange={e => updateIncident({ physicalCondition: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none bg-white">
-                  <option>Unknown</option>
-                  <option>Healthy</option>
-                  <option>Injured</option>
-                  <option>Impaired</option>
-                </select>
-              </div>
-            </div>
-          </section>
-
-          {/* Section 4: Environmental Snapshot */}
-          <section className="bg-white p-6 border border-[#E2E8F0] shadow-sm rounded-sm">
-            <div className="flex justify-between items-center border-b border-[#E2E8F0] pb-2 mb-4">
-              <h2 className="text-lg font-semibold text-[#0F766E]">4. Environmental Snapshot</h2>
-              <span className="text-xs text-[#64748B]">Optional but improves accuracy</span>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Wind Direction</label>
-                <select value={incidentData.windDirection} onChange={e => updateIncident({ windDirection: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none bg-white">
-                  <option value="">Select...</option>
-                  <option>N</option><option>NE</option><option>E</option><option>SE</option>
-                  <option>S</option><option>SW</option><option>W</option><option>NW</option>
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Wind Speed (km/h)</label>
-                <input type="number" min="0" value={incidentData.windSpeed} onChange={e => updateIncident({ windSpeed: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1">Water Conditions</label>
-                <select value={incidentData.waterConditions} onChange={e => updateIncident({ waterConditions: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none bg-white">
-                  <option value="">Select...</option>
-                  <option>Calm</option>
-                  <option>Light Chop</option>
-                  <option>Moderate</option>
-                  <option>Rough</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-[#0F172A] mb-1" title="Critical for estimating time to resurface">Water Temp (°C) ℹ️</label>
-                <input type="number" step="0.1" value={incidentData.waterTemp} onChange={e => updateIncident({ waterTemp: e.target.value })} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none" />
-              </div>
             </div>
           </section>
 
@@ -346,18 +225,6 @@ export default function IncidentReport() {
               </div>
             </div>
             <div className="flex gap-4">
-              <button type="button" className="px-4 py-3 bg-white border border-[#0F766E] text-[#0F766E] font-medium hover:bg-[#F0FDFA] transition-colors">
-                Save Draft
-              </button>
-              <button
-                type="button"
-                onClick={handleDownloadIncident}
-                disabled={!incidentData.lat || !incidentData.lng}
-                title="Download incident.json to drive the simulation at these coordinates"
-                className={`px-4 py-3 border font-medium transition-colors ${incidentData.lat && incidentData.lng ? 'bg-white border-[#0F766E] text-[#0F766E] hover:bg-[#F0FDFA]' : 'bg-gray-100 border-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
-              >
-                ⬇ incident.json
-              </button>
               <button
                 type="submit"
                 disabled={!isFormValid() || runState.running}
@@ -377,12 +244,17 @@ export default function IncidentReport() {
             attribution='&copy; <a href="https://carto.com/attributions">CARTO</a>'
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
+          <MapGrid />
+          <ScaleControl position="bottomright" />
           {incidentData.lspMode === 'map' && <MapClickHandler setPos={handleMapClick} />}
           {mapPos && <Marker position={mapPos} icon={customIcon} />}
           {incidentData.lat && incidentData.lng && incidentData.lspMode === 'coordinates' && (
              <Marker position={{ lat: parseFloat(incidentData.lat), lng: parseFloat(incidentData.lng) }} icon={customIcon} />
           )}
         </MapContainer>
+        <div className="absolute top-4 right-4 z-[1000] bg-white/90 px-2 py-1 border border-[#0F766E] text-xs font-bold text-[#0F766E] shadow-sm rounded-sm pointer-events-none">
+          Grid: 1km x 1km
+        </div>
       </div>
     </div>
   );

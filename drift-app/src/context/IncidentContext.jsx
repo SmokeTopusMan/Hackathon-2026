@@ -11,25 +11,14 @@ export const IncidentProvider = ({ children }) => {
   const [incidentData, setIncidentData] = useState({
     id: `INC-${new Date().getFullYear()}-${Math.floor(Math.random() * 1000).toString().padStart(4, '0')}`,
     date: '',
-    timeFrom: '',
-    timeTo: '',
-    waterBody: '',
+    time: '',
     lspMode: 'map', // 'coordinates' or 'map'
     lat: '',
     lng: '',
-    accuracy: 'Unknown',
-    victimName: '',
     victimAge: '',
     victimGender: 'Unknown',
     victimHeight: '',
-    victimWeight: '',
-    victimClothing: '',
-    swimmingAbility: 'Unknown',
-    physicalCondition: 'Unknown',
-    windDirection: '',
-    windSpeed: '',
-    waterConditions: '',
-    waterTemp: ''
+    victimWeight: ''
   });
 
   const [reports, setReports] = useState([]);
