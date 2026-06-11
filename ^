@@ -1,0 +1,18 @@
+[32m15:12:10[0m [1;35mINFO   [0m [34mopendrift:576:[0m OpenDriftSimulation initialised (version 1.14.9)
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:227:[0m Fallback values will be used for the following variables which have no readers: 
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	sea_surface_height: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	x_wind: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	y_wind: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	upward_sea_water_velocity: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	ocean_vertical_diffusivity: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	horizontal_diffusivity: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	sea_surface_wave_significant_height: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	sea_surface_wave_stokes_drift_x_velocity: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	sea_surface_wave_stokes_drift_y_velocity: 0.000000
+[32m15:12:13[0m [1;35mINFO   [0m [34mopendrift.models.basemodel.environment:230:[0m 	ocean_mixed_layer_thickness: 50.000000
+Traceback (most recent call last):
+  File "<string>", line 12, in <module>
+  File "C:\Users\intel\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\_core\_methods.py", line 45, in _amin
+    return umr_minimum(a, axis, None, out, keepdims, initial, where)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: zero-size array to reduction operation minimum which has no identity

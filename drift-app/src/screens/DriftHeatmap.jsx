@@ -31,29 +31,8 @@ function HeatmapLayer({ points }) {
   return null;
 }
 
-function generateHeatmapPoints(timeOffset) {
-  const points = [];
-  const count = 1500;
-  const cLat = 32.85 + (timeOffset * 0.0003);
-  const cLng = 34.95 + (timeOffset * 0.0001);
-  const spread = 0.01 + (timeOffset * 0.0005);
-  
-  for(let i=0; i<count; i++) {
-    const u1 = Math.random() || 0.001;
-    const u2 = Math.random() || 0.001;
-    const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-    const z1 = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
-    
-    const intensity = Math.random() * 0.8 + 0.2;
-    
-    points.push([
-      cLat + z0 * spread,
-      cLng + z1 * spread,
-      intensity
-    ]);
-  }
-  return points;
-}
+// Heatmap frames now come from the real DrownedBodyDrift simulation, exported
+// by test/sim_drowned_body.py to public/drift_data.json (one frame per hour).
 
 function MapTooltip() {
   const map = useMap();
@@ -86,10 +65,31 @@ function MapClickHandler({ onMapClick }) {
 export default function DriftHeatmap() {
   const navigate = useNavigate();
   const { incidentData } = useIncident();
-  
+
+  // Real simulation output (public/drift_data.json), produced by sim_drowned_body.py
+  const [driftData, setDriftData] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+
+  React.useEffect(() => {
+    fetch(`${import.meta.env.BASE_URL}drift_data.json`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(setDriftData)
+      .catch((e) => setLoadError(e.message));
+  }, []);
+
+  const frames = driftData?.frames ?? [];
+  const maxHour = frames.length ? frames.length - 1 : 72;
+
   const [timeOffset, setTimeOffset] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [showScanned, setShowScanned] = useState(true);
+
+  // keep the slider within the available frames once data loads
+  React.useEffect(() => {
+    if (timeOffset > maxHour) setTimeOffset(maxHour);
+  }, [maxHour]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const frame = frames[timeOffset] ?? null;
 
   const [scannedAreas, setScannedAreas] = useState([]);
 
@@ -98,9 +98,11 @@ export default function DriftHeatmap() {
   const [newScanPos, setNewScanPos] = useState(null);
   const [newScan, setNewScan] = useState({ team: '', time: '', radius: 500 });
 
-  const mapCenter = (incidentData.lat && incidentData.lng) 
-    ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)] 
-    : [32.82, 34.99];
+  const mapCenter = driftData?.lkp
+    ? [driftData.lkp.lat, driftData.lkp.lon]
+    : (incidentData.lat && incidentData.lng)
+      ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
+      : [32.82, 34.99];
 
   const handleAddScan = (e) => {
     e.preventDefault();
@@ -124,7 +126,7 @@ export default function DriftHeatmap() {
     }
   };
 
-  const heatmapPoints = useMemo(() => generateHeatmapPoints(timeOffset), [timeOffset]);
+  const heatmapPoints = useMemo(() => frame?.points ?? [], [frame]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -155,17 +157,35 @@ export default function DriftHeatmap() {
         </div>
 
         <div className="p-4 border-b border-[#E2E8F0]">
-          <div className="flex justify-between text-sm font-semibold text-[#0F172A] mb-3">
+          <div className="flex justify-between text-sm font-semibold text-[#0F172A] mb-1">
             <span>Model time:</span>
             <span className="text-[#0F766E]">T+{timeOffset}h</span>
           </div>
-          <input 
-            type="range" 
-            min="0" max="72" step="1" 
-            value={timeOffset} 
+          {frame?.label && (
+            <p className="text-xs text-[#64748B] mb-3">{frame.label} UTC</p>
+          )}
+          <input
+            type="range"
+            min="0" max={maxHour} step="1"
+            value={timeOffset}
             onChange={(e) => setTimeOffset(parseInt(e.target.value))}
             className="w-full accent-[#0F766E]"
           />
+          {frame && (
+            <div className="mt-3 text-xs space-y-1">
+              <div className="flex justify-between"><span className="text-[#2563EB] font-medium">Afloat (surface)</span><span className="font-semibold">{frame.afloat}%</span></div>
+              <div className="flex justify-between"><span className="text-[#DC2626] font-medium">Submerged</span><span className="font-semibold">{frame.submerged}%</span></div>
+              {frame.stranded > 0.05 && (
+                <div className="flex justify-between"><span className="text-[#64748B] font-medium">Stranded</span><span className="font-semibold">{frame.stranded}%</span></div>
+              )}
+            </div>
+          )}
+          {!driftData && !loadError && (
+            <p className="text-xs text-[#64748B] mt-3">Loading simulation…</p>
+          )}
+          {loadError && (
+            <p className="text-xs text-[#DC2626] mt-3">No sim data ({loadError}). Run sim_drowned_body.py.</p>
+          )}
         </div>
 
         <div className="p-4 border-b border-[#E2E8F0] flex-1 flex flex-col">
@@ -235,10 +255,14 @@ export default function DriftHeatmap() {
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
           
-          {/* LSP Marker */}
-          {incidentData.lat && incidentData.lng && (
+          {/* LKP marker — prefer the position the simulation actually used */}
+          {driftData?.lkp ? (
+            <Marker position={[driftData.lkp.lat, driftData.lkp.lon]} icon={customIcon}>
+              <Tooltip permanent direction="top" offset={[0, -36]}>LKP</Tooltip>
+            </Marker>
+          ) : (incidentData.lat && incidentData.lng && (
             <Marker position={[parseFloat(incidentData.lat), parseFloat(incidentData.lng)]} icon={customIcon} />
-          )}
+          ))}
 
           {isSelectingLocation && (
             <MapClickHandler onMapClick={(pos) => { setNewScanPos(pos); setIsSelectingLocation(false); }} />

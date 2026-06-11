@@ -114,6 +114,12 @@ PROB_QUERY_HOURS = [1, 6, 12, 24, 48, 72]
 HEATMAP_GRID_M = 300    # grid cell size in metres
 HEATMAP_SMOOTH = 0      # gaussian smoothing in cells (0 = crisp grid boxes)
 
+# --- React drift-app bridge ------------------------------------------------
+# The run also writes a JSON the drift-app map loads (drift-app/public/), with
+# one heatmap frame per output hour + afloat/submerged probabilities + the LKP.
+APP_JSON          = os.path.join(HERE, '..', 'drift-app', 'public', 'drift_data.json')
+APP_MAX_PARTICLES = 1500   # particles per frame in the JSON (keeps the file light)
+
 rng = np.random.default_rng(42)       # reproducible ensemble
 
 
@@ -350,6 +356,57 @@ def make_state_probability(ncfile, query_hours=PROB_QUERY_HOURS):
     print('  state-probability plot ->', out)
 
 
+def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
+                    intensity=0.45):
+    """Write the simulation result as JSON the React drift-app map loads:
+    one heatmap frame per output hour ([lat, lon, intensity] points) plus the
+    afloat/submerged/stranded probability of each frame and the LKP."""
+    import json
+
+    ds = xr.open_dataset(ncfile)
+    lon = ds['lon'].values            # (trajectory, time)
+    lat = ds['lat'].values
+    times = ds['time'].values
+    ds.close()
+    ntraj, ntime = lon.shape
+
+    step = max(1, ntraj // max_particles)
+    sel = np.arange(0, ntraj, step)
+
+    _, p_afloat, p_sub, p_strand = state_probabilities(ncfile)
+
+    frames = []
+    for t in range(ntime):
+        la = lat[sel, t]
+        lo = lon[sel, t]
+        good = np.isfinite(la) & np.isfinite(lo)
+        pts = [[round(float(a), 5), round(float(o), 5), intensity]
+               for a, o in zip(la[good], lo[good])]
+        frames.append({
+            'hour': int(round((times[t] - times[0]) / np.timedelta64(1, 'h'))),
+            'label': np.datetime_as_string(times[t], unit='m').replace('T', ' '),
+            'points': pts,
+            'afloat': round(float(p_afloat[t]) * 100, 1),
+            'submerged': round(float(p_sub[t]) * 100, 1),
+            'stranded': round(float(p_strand[t]) * 100, 1),
+        })
+
+    data = {
+        'lkp': {'lat': LKP_LAT, 'lon': LKP_LON},
+        'search_time': SEARCH_TIME.strftime('%Y-%m-%dT%H:%M:%S'),
+        'duration_hours': int(RUN_DURATION.total_seconds() // 3600),
+        'body': {'height_m': BODY_HEIGHT_M, 'weight_kg': BODY_WEIGHT_KG},
+        'source': SOURCE,
+        'n_particles': int(N_PARTICLES),
+        'frames': frames,
+    }
+    out_path = os.path.normpath(out_path)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh)
+    print(f'  app JSON -> {out_path} ({ntime} frames x {len(sel)} pts)')
+
+
 def make_interactive_map(ncfile, max_particles=2500):
     """Interactive, time-animated heatmap saved as a SELF-CONTAINED HTML page
     with its own Play / Pause / step controls and a time slider.
@@ -488,6 +545,7 @@ def main():
     make_heatmap_map(o)
     make_state_probability(NCFILE)
     make_interactive_map(NCFILE)
+    export_app_json(NCFILE)
     print('Done. Outputs in', OUTDIR)
 
 
