@@ -257,11 +257,7 @@ export default function SearchPlan() {
       <div className="w-[400px] bg-white border-r border-[#E2E8F0] flex flex-col shrink-0 overflow-y-auto">
 
         <div className="p-6 border-b border-[#E2E8F0]">
-          <h2 className="text-xl font-bold text-[#0F172A] mb-1">Search Plan</h2>
-          <p className="text-xs text-[#64748B] mb-4">
-            Coordinated greedy coverage of the drift heatmap. Teams launch from
-            shore and sweep over water only.
-          </p>
+          <h2 className="text-xl font-bold text-[#0F172A] mb-4">Search Plan</h2>
 
           {/* the plan tracks the heatmap time; adjustable here too */}
           <div className="mb-2 flex justify-between text-sm font-semibold text-[#0F172A]">
@@ -299,11 +295,7 @@ export default function SearchPlan() {
         </div>
 
         <div className="p-6 border-b border-[#E2E8F0]">
-          <h3 className="font-semibold text-[#0F172A] mb-1">Deploy Vehicles</h3>
-          <p className="text-xs text-[#64748B] mb-3">
-            Click anywhere on the map to drop a launch point, then pick the craft.
-            The plan routes the fleet from your points.
-          </p>
+          <h3 className="font-semibold text-[#0F172A] mb-3">Deploy Vehicles</h3>
 
           <div className="mb-3">
             <label className="block text-xs font-medium text-[#0F172A] mb-1">
@@ -483,7 +475,7 @@ export default function SearchPlan() {
 
         {/* animation controls */}
         {teams.length > 0 && (
-          <div className="absolute top-4 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
+          <div className="absolute top-14 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
             <button onClick={() => { if (animStep >= animTotal) setAnimStep(1); setPlaying((p) => !p); }}
               className="px-3 py-1.5 text-sm font-semibold bg-[#1E5C9E] text-white rounded hover:bg-[#16487C]">
               {playing ? '❚❚ Pause' : (animStep >= animTotal ? '↻ Replay' : '▶ Play')}
