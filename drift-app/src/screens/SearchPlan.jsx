@@ -173,9 +173,15 @@ export default function SearchPlan() {
   };
   const removeVehicle = (id) => setUserVehicles((v) => v.filter((x) => x.id !== id));
   const handleGeneratePlan = () => {
-    if (!userVehicles.length || generating) return;
-    setPlanMode('user');
-    doPlan('user', userVehicles, searchHour);
+    if (generating) return;
+    if (userVehicles.length) {
+      setPlanMode('user');
+      doPlan('user', userVehicles, searchHour);
+    } else {
+      // no vehicles placed -> generate the automatic shore-launch plan
+      setPlanMode('auto');
+      doPlan('auto', [], searchHour);
+    }
   };
   const handleCancelPlan = () => {
     reqIdRef.current += 1;
@@ -187,24 +193,15 @@ export default function SearchPlan() {
     if (generating) return;
     setUserVehicles([]);
     setPendingPos(null);
-    setPlanMode('auto');          // the auto-plan effect below re-plans for us
+    setPlanMode('auto');
+    doPlan('auto', [], searchHour);   // explicit "Auto" click -> regenerate the shore plan
   };
 
-  // AUTO mode: (re)compute the shore-launch plan on first load and whenever the
-  // search-start hour (forecast slider + deploy delay) changes, so the routes
-  // always match the heatmap underneath. USER mode is driven by the Generate
-  // button instead. doPlan supersedes any in-flight request (reqIdRef/abort),
-  // so dragging the slider just cancels the stale fetch.
-  useEffect(() => {
-    if (planMode !== 'auto' || !driftData) return;
-    // doPlan kicks off an async fetch (its setState is the standard
-    // fetch-on-change pattern; it can't re-trigger this effect since it touches
-    // none of the deps).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    doPlan('auto', [], searchHour);
-    // doPlan omitted from deps: stable setters/refs + context fetchers only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [planMode, searchHour, driftData]);
+  // NOTE: the Search Plan no longer generates a plan automatically — not on
+  // arrival, and not when the forecast time changes. The user explicitly
+  // triggers planning with the Generate button (which produces the automatic
+  // shore-launch plan when no vehicles are placed, or routes the user's fleet
+  // when they are). This keeps navigating here from kicking off a plan on its own.
 
   const mapCenter = (incidentData.lat && incidentData.lng)
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
@@ -366,8 +363,7 @@ export default function SearchPlan() {
               <button
                 type="button"
                 onClick={handleGeneratePlan}
-                disabled={!userVehicles.length}
-                className={`flex-1 py-2 text-sm font-medium ${userVehicles.length ? 'bg-[#1E5C9E] text-white hover:bg-[#16487C]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+                className="flex-1 py-2 text-sm font-semibold rounded-sm bg-[#1E5C9E] text-white hover:bg-[#16487C]"
               >
                 Generate Plan
               </button>
