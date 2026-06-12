@@ -114,8 +114,21 @@ export const IncidentProvider = ({ children }) => {
 
   // Recompute the coordinated search plan for a specific forecast hour
   // (the hour currently shown on the heatmap). Teams launch from shore.
-  const fetchPlanForHour = useCallback(async (hour) => {
-    const r = await fetch(`${API}/plan?hour=${hour}`);
+  const fetchPlanForHour = useCallback(async (hour, signal) => {
+    const r = await fetch(`${API}/plan?hour=${hour}`, { signal });
+    if (!r.ok) throw new Error(`plan failed (HTTP ${r.status})`);
+    return r.json();
+  }, []);
+
+  // Recompute the plan for a fleet of user-placed vehicles (each {lat, lng, type}).
+  // Teams launch from those points with type-driven speeds.
+  const fetchPlanForVehicles = useCallback(async (hour, vehicles, signal) => {
+    const r = await fetch(`${API}/plan?hour=${hour}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hour, vehicles }),
+      signal,
+    });
     if (!r.ok) throw new Error(`plan failed (HTTP ${r.status})`);
     return r.json();
   }, []);
@@ -124,7 +137,8 @@ export const IncidentProvider = ({ children }) => {
     <IncidentContext.Provider value={{
       incidentData, updateIncident, reports, addReport, deleteReport,
       driftData, setDriftData, currentHour, setCurrentHour,
-      runState, setRunState, runSimulation, cancelSimulation, fetchPlanForHour,
+      runState, setRunState, runSimulation, cancelSimulation,
+      fetchPlanForHour, fetchPlanForVehicles,
     }}>
       {children}
     </IncidentContext.Provider>

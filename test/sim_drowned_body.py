@@ -223,6 +223,8 @@ PLAN_BOAT_MPS    = 7.0     # search boat   (~13 kn)
 PLAN_JETSKI_MPS  = 14.0    # jet-ski       (~27 kn)
 # fleet cycled across the teams: (label, speed m/s). Faster craft cover more.
 PLAN_FLEET       = [('Boat', PLAN_BOAT_MPS), ('Jetski', PLAN_JETSKI_MPS)]
+# user-placed vehicle types (from the Search Plan map) -> real speed (m/s).
+PLAN_TYPE_SPEED  = {'jetski': PLAN_JETSKI_MPS, 'boat': PLAN_BOAT_MPS}
 # --- convergence (replaces a fixed step horizon) ---------------------------
 PLAN_TICK_SEC     = 20.0   # wall-clock seconds per planning tick
 PLAN_COVERAGE     = 0.95   # stop once this fraction of probability is cleared ...
@@ -974,11 +976,34 @@ def _cell_to_lonlat(r, c, xe, ye):
     return lon, lat
 
 
-def plan_search(ncfile, hour=None):
-    """Route the heterogeneous rescue team over the body-probability heatmap at
-    forecast `hour` (defaults to PLAN_HOUR) using core.search_planner. Teams
-    launch FROM SHORE and may only travel over water. Returns a JSON-
-    serialisable plan dict plus the raw planner result and grid for plotting."""
+def _lonlat_to_cell(lon, lat, xe, ye):
+    """Inverse of _cell_to_lonlat: the grid cell (row=lat, col=lon) holding
+    (lon, lat), clamped to the grid bounds. xe/ye are ascending edge arrays."""
+    c = int(np.clip(np.searchsorted(xe, lon) - 1, 0, len(xe) - 2))
+    r = int(np.clip(np.searchsorted(ye, lat) - 1, 0, len(ye) - 2))
+    return r, c
+
+
+def _nearest_water_cell(r, c, water):
+    """Nearest water cell to (r, c). Returns (r, c) unchanged if it is already
+    water or if the grid holds no water. Lets a user drop a launch point on or
+    near land and still get a valid sea start."""
+    if water[r, c]:
+        return r, c
+    rr, cc = np.nonzero(water)
+    if rr.size == 0:
+        return r, c
+    k = int(np.argmin((rr - r) ** 2 + (cc - c) ** 2))
+    return int(rr[k]), int(cc[k])
+
+
+def plan_search(ncfile, hour=None, vehicles=None):
+    """Route the rescue team over the body-probability heatmap at forecast `hour`
+    (defaults to PLAN_HOUR) using core.search_planner. Teams may only travel over
+    water. When `vehicles` is given (a list of {lat, lng, type} dicts from the
+    Search Plan map) the fleet launches from THOSE points with type-driven speeds;
+    otherwise it auto-launches from the shore points nearest the mass. Returns a
+    JSON-serialisable plan dict plus the raw planner result and grid for plotting."""
     if hour is None:
         hour = PLAN_HOUR
     prob, xe, ye, hour, cell_m = _plan_prob_grid(ncfile, hour=hour)
@@ -991,16 +1016,26 @@ def plan_search(ncfile, hour=None):
     if prob.sum():
         prob = prob / prob.sum()
 
-    # teams put to sea from the points nearest the probability mass
-    starts = _shore_launch_cells(water, prob, PLAN_TEAMS)
-
-    # heterogeneous fleet: real boat/jet-ski speeds (m/s) and a metre sonar swath
+    # fleet: user-placed vehicles (start point + type) when provided, else the
+    # automatic shore-launch fleet nearest the probability mass.
     agents = []
-    for i in range(PLAN_TEAMS):
-        label, speed = PLAN_FLEET[i % len(PLAN_FLEET)]
-        agents.append(Agent(starts[i], speed_mps=speed, sonar_radius_m=PLAN_SONAR_M,
-                            name=f"{label} {i + 1}",
-                            color=PLAN_COLORS[i % len(PLAN_COLORS)]))
+    if vehicles:
+        for i, v in enumerate(vehicles):
+            lat = float(v.get('lat'))
+            lon = float(v.get('lng', v.get('lon')))
+            vtype = str(v.get('type', 'boat')).lower()
+            speed = PLAN_TYPE_SPEED.get(vtype, PLAN_BOAT_MPS)
+            r, c = _nearest_water_cell(*_lonlat_to_cell(lon, lat, xe, ye), water)
+            agents.append(Agent((r, c), speed_mps=speed, sonar_radius_m=PLAN_SONAR_M,
+                                name=f"{vtype.title()} {i + 1}",
+                                color=PLAN_COLORS[i % len(PLAN_COLORS)]))
+    else:
+        starts = _shore_launch_cells(water, prob, PLAN_TEAMS)
+        for i in range(PLAN_TEAMS):
+            label, speed = PLAN_FLEET[i % len(PLAN_FLEET)]
+            agents.append(Agent(starts[i], speed_mps=speed, sonar_radius_m=PLAN_SONAR_M,
+                                name=f"{label} {i + 1}",
+                                color=PLAN_COLORS[i % len(PLAN_COLORS)]))
     planner = CoveragePlanner(prob, agents, cell_m=cell_m,
                               tick_seconds=PLAN_TICK_SEC,
                               coverage_target=PLAN_COVERAGE,
@@ -1046,7 +1081,7 @@ def plan_search(ncfile, hour=None):
         'reference_grid': refgrid,
         'teams': teams,
     }
-    print(f"  search plan: {PLAN_TEAMS} craft @ {cell_m:.0f} m grid -> "
+    print(f"  search plan: {len(agents)} craft @ {cell_m:.0f} m grid -> "
           f"{plan['total_cleared_pct']:.1f}% cleared in {plan['mission_time_min']:.0f} min "
           f"({res['stop_reason']}, plan hour {hour})")
     return plan, res, prob, xe, ye

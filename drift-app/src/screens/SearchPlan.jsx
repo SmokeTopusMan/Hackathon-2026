@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useIncident } from '../context/IncidentContext';
-import { MapContainer, TileLayer, Marker, Polyline, Tooltip, CircleMarker, Circle, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, Tooltip, CircleMarker, Circle, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet.heat';
 
@@ -74,9 +74,31 @@ function ReferenceGrid({ grid }) {
   );
 }
 
+function PlanClickHandler({ onMapClick }) {
+  useMapEvents({ click(e) { onMapClick(e.latlng); } });
+  return null;
+}
+
+const VEHICLE_EMOJI = { jetski: '🚤', boat: '⛵' };
+const VEHICLE_LABEL = { jetski: 'Jet-ski', boat: 'Boat' };
+
+function vehicleIcon(type) {
+  return L.divIcon({
+    className: 'veh-marker',
+    html: `<div style="font-size:22px;line-height:22px">${VEHICLE_EMOJI[type] || '⛵'}</div>`,
+    iconSize: [24, 24], iconAnchor: [12, 12],
+  });
+}
+
+const pendingIcon = L.divIcon({
+  className: 'veh-pending',
+  html: '<div style="font-size:22px;line-height:22px">📍</div>',
+  iconSize: [24, 24], iconAnchor: [12, 24],
+});
+
 export default function SearchPlan() {
   const navigate = useNavigate();
-  const { incidentData, driftData, setDriftData, currentHour, setCurrentHour, fetchPlanForHour } = useIncident();
+  const { incidentData, driftData, setDriftData, currentHour, setCurrentHour, fetchPlanForHour, fetchPlanForVehicles } = useIncident();
 
   // make sure we have sim output (in case the user deep-linked here)
   useEffect(() => {
@@ -91,36 +113,93 @@ export default function SearchPlan() {
   const frames = driftData?.frames ?? [];
   const maxHour = frames.length ? frames.length - 1 : 168;
 
-  // the plan is (re)computed for the hour currently shown on the heatmap
   const [plan, setPlan] = useState(null);
-  const [planLoading, setPlanLoading] = useState(false);
   const [planError, setPlanError] = useState(null);
+  // delay (hours) before the rescue forces actually deploy: the search is planned
+  // on the heatmap at SEARCH START = selected hour + this delay.
+  const [searchDelayHours, setSearchDelayHours] = useState(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    setPlanLoading(true);
+  // user-placed fleet: each vehicle is { id, lat, lng, type }
+  const [userVehicles, setUserVehicles] = useState([]);
+  const [pendingPos, setPendingPos] = useState(null);
+  const [planMode, setPlanMode] = useState('auto');   // 'auto' | 'user'
+  const [generating, setGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState(0);
+
+  const abortRef = useRef(null);
+  const reqIdRef = useRef(0);
+
+  const searchHour = Math.min(currentHour + searchDelayHours, maxHour);
+
+  // Generate a plan. A request token (reqIdRef) makes Cancel authoritative: a
+  // cancelled or superseded run is ignored when it finally settles, so the UI
+  // never flips back to "generating" and never shows a stale plan.
+  const doPlan = async (mode, vehicles, hour) => {
+    const myId = ++reqIdRef.current;
+    if (abortRef.current) abortRef.current.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setGenerating(true);
+    setGenProgress(12);
     setPlanError(null);
-    fetchPlanForHour(currentHour)
-      .then((p) => { if (!cancelled) setPlan(p); })
-      .catch((e) => {
-        if (cancelled) return;
-        // no backend -> fall back to the plan embedded in the sim output
-        if (driftData?.search_plan) setPlan(driftData.search_plan);
-        else setPlanError(e.message);
-      })
-      .finally(() => { if (!cancelled) setPlanLoading(false); });
-    return () => { cancelled = true; };
-  }, [currentHour, fetchPlanForHour, driftData]);
+    try {
+      const p = (mode === 'user' && vehicles.length)
+        ? await fetchPlanForVehicles(hour, vehicles, ctrl.signal)
+        : await fetchPlanForHour(hour, ctrl.signal);
+      if (reqIdRef.current !== myId) return;
+      setPlan(p);
+      setGenProgress(100);
+      setGenerating(false);
+    } catch (e) {
+      if (reqIdRef.current !== myId) return;
+      if (mode !== 'user' && driftData?.search_plan) setPlan(driftData.search_plan);
+      else if (e.name !== 'AbortError') setPlanError(e.message);
+      setGenerating(false);
+    }
+  };
+
+  // animate the progress bar while a plan is being formed
+  useEffect(() => {
+    if (!generating) return;
+    const id = setInterval(
+      () => setGenProgress((p) => (p < 92 ? p + Math.max(1, (92 - p) * 0.12) : p)), 180);
+    return () => clearInterval(id);
+  }, [generating]);
+
+  const addVehicle = (type) => {
+    if (!pendingPos) return;
+    setUserVehicles((v) => [...v, { id: Date.now(), lat: pendingPos.lat, lng: pendingPos.lng, type }]);
+    setPendingPos(null);
+  };
+  const removeVehicle = (id) => setUserVehicles((v) => v.filter((x) => x.id !== id));
+  const handleGeneratePlan = () => {
+    if (!userVehicles.length || generating) return;
+    setPlanMode('user');
+    doPlan('user', userVehicles, searchHour);
+  };
+  const handleCancelPlan = () => {
+    reqIdRef.current += 1;
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    setGenerating(false);
+    setGenProgress(0);
+  };
+  const handleClearVehicles = () => {
+    if (generating) return;
+    setUserVehicles([]);
+    setPendingPos(null);
+    setPlanMode('auto');
+    doPlan('auto', [], searchHour);
+  };
 
   const mapCenter = (incidentData.lat && incidentData.lng)
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
     : driftData?.lkp ? [driftData.lkp.lat, driftData.lkp.lon] : [32.82, 34.99];
 
-  // heatmap underlay = the frame the plan is computed on (current hour)
+  // heatmap underlay = the frame the plan is computed on (the search-start hour)
   const heatmapPoints = useMemo(() => {
     if (!frames.length) return [];
-    return frames[Math.min(currentHour, frames.length - 1)]?.points ?? [];
-  }, [frames, currentHour]);
+    return frames[Math.min(searchHour, frames.length - 1)]?.points ?? [];
+  }, [frames, searchHour]);
 
   const teams = plan?.teams ?? [];
   const totalKm = teams.reduce((s, t) => s + pathKm(t.waypoints), 0);
@@ -179,15 +258,94 @@ export default function SearchPlan() {
             not a fixed step count. Team count / sonar from the simulation.
           </p>
 
-          {planLoading && (
+          {generating && (
             <div className="mt-4 flex items-center gap-2 text-sm text-[#0F766E]">
               <span className="inline-block w-4 h-4 border-2 border-[#0F766E] border-t-transparent rounded-full animate-spin"></span>
-              Planning for T+{currentHour}h…
+              Planning for T+{searchHour}h…
             </div>
           )}
           {planError && (
             <p className="text-xs text-[#DC2626] mt-3">No plan ({planError}). Run a simulation first.</p>
           )}
+        </div>
+
+        <div className="p-6 border-b border-[#E2E8F0]">
+          <h3 className="font-semibold text-[#0F172A] mb-1">Deploy Vehicles</h3>
+          <p className="text-xs text-[#64748B] mb-3">
+            Click anywhere on the map to drop a launch point, then pick the craft.
+            The plan routes the fleet from your points.
+          </p>
+
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-[#0F172A] mb-1">
+              Force deployment delay (hours)
+            </label>
+            <input
+              type="number" min="0" max={maxHour} step="1" value={searchDelayHours}
+              onChange={(e) => setSearchDelayHours(Math.max(0, Math.min(maxHour, parseInt(e.target.value) || 0)))}
+              disabled={generating}
+              className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none text-sm disabled:bg-gray-100"
+            />
+            <p className="text-[11px] text-[#64748B] mt-1">
+              Search starts at <span className="font-semibold text-[#0F766E]">T+{searchHour}h</span> — the
+              heatmap when the forces actually reach the water.
+            </p>
+          </div>
+
+          {userVehicles.length > 0 ? (
+            <div className="space-y-1 mb-3">
+              {userVehicles.map((v, i) => (
+                <div key={v.id} className="flex items-center justify-between text-sm border border-[#E2E8F0] bg-gray-50 px-2 py-1">
+                  <span className="flex items-center gap-2">
+                    <span className="text-lg">{VEHICLE_EMOJI[v.type]}</span>
+                    <span className="font-medium">{VEHICLE_LABEL[v.type]} {i + 1}</span>
+                  </span>
+                  <button type="button" onClick={() => removeVehicle(v.id)} disabled={generating} className="text-[#94A3B8] hover:text-[#DC2626] font-bold px-1 disabled:opacity-40">×</button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-[#94A3B8] italic mb-3">No vehicles placed — the plan uses automatic shore launch points.</p>
+          )}
+
+          {generating && (
+            <div className="mb-3">
+              <div className="flex justify-between text-[11px] text-[#64748B] mb-1">
+                <span>Forming plan…</span>
+                <span>{Math.round(genProgress)}%</span>
+              </div>
+              <div className="w-full bg-[#E2E8F0] h-2 rounded-full overflow-hidden">
+                <div className="bg-[#0F766E] h-full transition-all duration-200 ease-out"
+                     style={{ width: `${Math.max(5, genProgress)}%` }}></div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            {generating ? (
+              <button
+                type="button"
+                onClick={handleCancelPlan}
+                className="flex-1 py-2 text-sm font-medium bg-[#DC2626] text-white hover:bg-[#B91C1C]"
+              >
+                ✕ Cancel
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGeneratePlan}
+                disabled={!userVehicles.length}
+                className={`flex-1 py-2 text-sm font-medium ${userVehicles.length ? 'bg-[#0F766E] text-white hover:bg-[#115E59]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+              >
+                Generate Plan
+              </button>
+            )}
+            {planMode === 'user' && !generating && (
+              <button type="button" onClick={handleClearVehicles} className="px-3 py-2 text-sm font-medium border border-[#E2E8F0] text-[#64748B] hover:bg-gray-50">
+                Auto
+              </button>
+            )}
+          </div>
         </div>
 
         {plan && (
@@ -256,6 +414,13 @@ export default function SearchPlan() {
 
       {/* Right Map Panel */}
       <div className="flex-1 relative bg-blue-50">
+
+        {!generating && !pendingPos && (
+          <div className="absolute top-0 left-0 right-0 z-[500] bg-blue-50/90 border-b border-blue-200 text-blue-800 text-xs p-2 text-center font-medium shadow-sm pointer-events-none">
+            Click the map to add a vehicle launch point
+          </div>
+        )}
+
         <MapContainer center={mapCenter} zoom={12} className="w-full h-full" zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://carto.com/attributions">CARTO</a>'
@@ -263,6 +428,19 @@ export default function SearchPlan() {
           />
 
           <HeatmapLayer points={heatmapPoints} />
+
+          {!generating && !pendingPos && (
+            <PlanClickHandler onMapClick={(pos) => setPendingPos(pos)} />
+          )}
+
+          {userVehicles.map((v, i) => (
+            <Marker key={v.id} position={[v.lat, v.lng]} icon={vehicleIcon(v.type)}>
+              <Tooltip direction="top" offset={[0, -10]} className="text-xs font-bold">{VEHICLE_LABEL[v.type]} {i + 1}</Tooltip>
+            </Marker>
+          ))}
+          {pendingPos && (
+            <Marker position={[pendingPos.lat, pendingPos.lng]} icon={pendingIcon} />
+          )}
 
           {/* coarse labelled comms grid (A,B,C.. / 1,2,3..) for the teams */}
           <ReferenceGrid grid={plan?.reference_grid} />
@@ -304,6 +482,32 @@ export default function SearchPlan() {
             );
           })}
         </MapContainer>
+
+        {pendingPos && (
+          <div className="absolute inset-0 z-[1000] flex items-center justify-center bg-black/30">
+            <div className="bg-white rounded-lg shadow-xl p-5 w-80">
+              <h4 className="font-bold text-[#0F172A] mb-1 text-center">Choose vehicle type</h4>
+              <p className="text-xs text-[#64748B] text-center mb-4">Launch point selected. Pick the craft, or cancel.</p>
+              <div className="grid grid-cols-3 gap-3">
+                <button type="button" onClick={() => addVehicle('jetski')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
+                  <span className="text-3xl">🚤</span>
+                  <span className="text-sm font-semibold text-[#0F172A]">Jet-ski</span>
+                  <span className="text-[10px] text-[#64748B]">fast</span>
+                </button>
+                <button type="button" onClick={() => addVehicle('boat')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
+                  <span className="text-3xl">⛵</span>
+                  <span className="text-sm font-semibold text-[#0F172A]">Boat</span>
+                  <span className="text-[10px] text-[#64748B]">slower</span>
+                </button>
+                <button type="button" onClick={() => setPendingPos(null)} className="flex flex-col items-center gap-1 py-4 border-2 border-red-200 rounded-md text-[#DC2626] hover:border-[#DC2626] hover:bg-red-50">
+                  <span className="text-3xl leading-none">✕</span>
+                  <span className="text-sm font-semibold">Cancel</span>
+                  <span className="text-[10px] text-[#DC2626]/70">don't add</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* animation controls */}
         {teams.length > 0 && (

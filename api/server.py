@@ -122,16 +122,24 @@ def drift_data():
     return send_file(path, mimetype='application/json')
 
 
-@app.get('/api/plan')
+@app.route('/api/plan', methods=['GET', 'POST'])
 def plan():
-    """Recompute the search plan for a given forecast hour (UI slider)."""
+    """Recompute the search plan for a given forecast hour (UI slider).
+
+    GET  /api/plan?hour=H            -> auto shore-launch fleet.
+    POST /api/plan?hour=H  {vehicles: [{lat, lng, type}, ...]}
+                                     -> fleet launches from those user-placed
+                                        points with type-driven speeds."""
     if not os.path.exists(sim.NCFILE):
         return jsonify(error='no simulation output; run a simulation first'), 404
+    body = request.get_json(silent=True) or {}
     try:
-        hour = int(request.args.get('hour', sim.PLAN_HOUR))
+        hour = int(request.args.get('hour', body.get('hour', sim.PLAN_HOUR)))
     except (TypeError, ValueError):
         hour = sim.PLAN_HOUR
-    plan_dict, _res, _prob, _xe, _ye = sim.plan_search(sim.NCFILE, hour=hour)
+    vehicles = body.get('vehicles') or None
+    plan_dict, _res, _prob, _xe, _ye = sim.plan_search(
+        sim.NCFILE, hour=hour, vehicles=vehicles)
     return jsonify(plan_dict)
 
 
