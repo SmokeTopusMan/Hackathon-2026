@@ -1019,6 +1019,7 @@ def plan_search(ncfile, hour=None, vehicles=None):
     # fleet: user-placed vehicles (start point + type) when provided, else the
     # automatic shore-launch fleet nearest the probability mass.
     agents = []
+    user_starts = [] if vehicles else None
     if vehicles:
         for i, v in enumerate(vehicles):
             lat = float(v.get('lat'))
@@ -1026,6 +1027,7 @@ def plan_search(ncfile, hour=None, vehicles=None):
             vtype = str(v.get('type', 'boat')).lower()
             speed = PLAN_TYPE_SPEED.get(vtype, PLAN_BOAT_MPS)
             r, c = _nearest_water_cell(*_lonlat_to_cell(lon, lat, xe, ye), water)
+            user_starts.append((lat, lon))
             agents.append(Agent((r, c), speed_mps=speed, sonar_radius_m=PLAN_SONAR_M,
                                 name=f"{vtype.title()} {i + 1}",
                                 color=PLAN_COLORS[i % len(PLAN_COLORS)]))
@@ -1050,13 +1052,16 @@ def plan_search(ncfile, hour=None, vehicles=None):
         target_cell_m=REFGRID_CELL_M)
 
     teams = []
-    for a in agents:
+    for i, a in enumerate(agents):
         waypoints = [[round(lat, 5), round(lon, 5)]              # -> [lat, lon]
                      for (r, c) in a.path
                      for (lon, lat) in [_cell_to_lonlat(r, c, xe, ye)]]
         s_lon, s_lat = _cell_to_lonlat(a.path[0][0], a.path[0][1], xe, ye)
+        launch = ([round(user_starts[i][0], 5), round(user_starts[i][1], 5)]
+                  if user_starts else None)
         teams.append({
             'team': a.name, 'color': a.color,
+            'launch': launch,
             'speed_mps': round(a.speed_mps, 1),
             'sonar_radius_m': PLAN_SONAR_M,
             'cleared_pct': round(a.cleared_prob * 100, 1),

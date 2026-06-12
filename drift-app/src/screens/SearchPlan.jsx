@@ -79,15 +79,30 @@ function PlanClickHandler({ onMapClick }) {
   return null;
 }
 
-const VEHICLE_EMOJI = { jetski: '🚤', boat: '⛵' };
+const VEHICLE_EMOJI = { boat: '🚤' };   // jet-ski uses a generated SVG (no emoji fits)
 const VEHICLE_LABEL = { jetski: 'Jet-ski', boat: 'Boat' };
 
+// side-view jet-ski: angled handlebar, sleek hull, water spray
+const JETSKI_SVG = '<svg viewBox="0 0 32 24" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
+  + '<path d="M19 8 l5 -4" stroke="#0f766e" stroke-width="2.2" stroke-linecap="round" fill="none"/>'
+  + '<path d="M3 13 C5 9 9 8 14 8 L21 8 C24 8 25 10 26 13 C24 16 20 17 14 17 C8 17 5 16 3 13 Z" fill="#0f766e"/>'
+  + '<path d="M12 8 C13 6 17 6 18 8 Z" fill="#0f766e"/>'
+  + '<path d="M2 20 q3 2 6 0 t6 0 t6 0 t6 0" stroke="#38bdf8" stroke-width="1.6" fill="none" stroke-linecap="round"/>'
+  + '</svg>';
+
+function VehicleGlyph({ type, size = 18 }) {
+  if (type === 'jetski') {
+    return <span style={{ display: 'inline-block', width: Math.round(size * 1.35), height: size, lineHeight: 0 }}
+      dangerouslySetInnerHTML={{ __html: JETSKI_SVG }} />;
+  }
+  return <span style={{ fontSize: size, lineHeight: 1 }}>{VEHICLE_EMOJI[type] || '🚤'}</span>;
+}
+
 function vehicleIcon(type) {
-  return L.divIcon({
-    className: 'veh-marker',
-    html: `<div style="font-size:22px;line-height:22px">${VEHICLE_EMOJI[type] || '⛵'}</div>`,
-    iconSize: [24, 24], iconAnchor: [12, 12],
-  });
+  const html = type === 'jetski'
+    ? `<div style="width:28px;height:21px;line-height:0">${JETSKI_SVG}</div>`
+    : `<div style="font-size:22px;line-height:22px">${VEHICLE_EMOJI[type] || '🚤'}</div>`;
+  return L.divIcon({ className: 'veh-marker', html, iconSize: [28, 22], iconAnchor: [14, 11] });
 }
 
 const pendingIcon = L.divIcon({
@@ -195,21 +210,36 @@ export default function SearchPlan() {
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
     : driftData?.lkp ? [driftData.lkp.lat, driftData.lkp.lon] : [32.82, 34.99];
 
-  // heatmap underlay = the frame the plan is computed on (the search-start hour)
-  const heatmapPoints = useMemo(() => {
-    if (!frames.length) return [];
-    return frames[Math.min(searchHour, frames.length - 1)]?.points ?? [];
-  }, [frames, searchHour]);
-
   const teams = plan?.teams ?? [];
   const totalKm = teams.reduce((s, t) => s + pathKm(t.waypoints), 0);
 
   // ---- animation: watch the teams sweep out from shore (algorithm running) --
-  const teamTracks = useMemo(() => teams.map((t) => dedupe(t.waypoints)), [teams]);
+  // anchor each track at the user's placed launch point (echoed by the backend
+  // as `launch`), so the vehicle visibly leaves where it was dropped rather than
+  // starting at the snapped grid cell out at sea.
+  const teamTracks = useMemo(() => teams.map((t) => {
+    const wp = dedupe(t.waypoints);
+    return t.launch ? dedupe([t.launch, ...wp]) : wp;
+  }), [teams]);
   const maxLen = useMemo(
     () => Math.max(1, ...teamTracks.map((p) => p.length)), [teamTracks]);
   const [animStep, setAnimStep] = useState(1);
   const [playing, setPlaying] = useState(true);
+
+  // ---- two-phase replay timeline ----------------------------------------
+  // phase 1 (steps 1..driftSteps): the body drifts hour by hour with the
+  // vehicles parked at their launch points; phase 2: the fleet deploys and
+  // sweeps along the planned paths over the search-start heatmap.
+  const driftSteps = plan ? searchHour : 0;
+  const animTotal = driftSteps + maxLen;
+  const inDrift = !!plan && animStep <= driftSteps;
+  const replayFrameIdx = inDrift ? Math.min(animStep - 1, searchHour) : searchHour;
+  const revealLen = inDrift ? 1 : (animStep - driftSteps);
+
+  const heatmapPoints = useMemo(() => {
+    if (!frames.length) return [];
+    return frames[Math.min(replayFrameIdx, frames.length - 1)]?.points ?? [];
+  }, [frames, replayFrameIdx]);
 
   // (re)start the animation whenever a new plan arrives
   useEffect(() => {
@@ -219,10 +249,10 @@ export default function SearchPlan() {
   // advance one waypoint at a time while playing
   useEffect(() => {
     if (!playing) return;
-    if (animStep >= maxLen) { setPlaying(false); return; }
-    const id = setTimeout(() => setAnimStep((s) => Math.min(maxLen, s + 1)), 240);
+    if (animStep >= animTotal) { setPlaying(false); return; }
+    const id = setTimeout(() => setAnimStep((s) => Math.min(animTotal, s + 1)), 240);
     return () => clearTimeout(id);
-  }, [playing, animStep, maxLen]);
+  }, [playing, animStep, animTotal]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -297,7 +327,7 @@ export default function SearchPlan() {
               {userVehicles.map((v, i) => (
                 <div key={v.id} className="flex items-center justify-between text-sm border border-[#E2E8F0] bg-gray-50 px-2 py-1">
                   <span className="flex items-center gap-2">
-                    <span className="text-lg">{VEHICLE_EMOJI[v.type]}</span>
+                    <VehicleGlyph type={v.type} size={18} />
                     <span className="font-medium">{VEHICLE_LABEL[v.type]} {i + 1}</span>
                   </span>
                   <button type="button" onClick={() => removeVehicle(v.id)} disabled={generating} className="text-[#94A3B8] hover:text-[#DC2626] font-bold px-1 disabled:opacity-40">×</button>
@@ -454,7 +484,7 @@ export default function SearchPlan() {
               algorithm sweeping out, revealed one waypoint per tick. */}
           {teams.map((t, i) => {
             const full = teamTracks[i];
-            const shown = full.slice(0, Math.max(1, animStep));   // path so far
+            const shown = full.slice(0, Math.max(1, revealLen));   // parked during drift, then revealed
             const head = shown[shown.length - 1];                 // current position
             return (
               <React.Fragment key={`team-${i}`}>
@@ -490,12 +520,12 @@ export default function SearchPlan() {
               <p className="text-xs text-[#64748B] text-center mb-4">Launch point selected. Pick the craft, or cancel.</p>
               <div className="grid grid-cols-3 gap-3">
                 <button type="button" onClick={() => addVehicle('jetski')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
-                  <span className="text-3xl">🚤</span>
+                  <VehicleGlyph type="jetski" size={30} />
                   <span className="text-sm font-semibold text-[#0F172A]">Jet-ski</span>
                   <span className="text-[10px] text-[#64748B]">fast</span>
                 </button>
                 <button type="button" onClick={() => addVehicle('boat')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
-                  <span className="text-3xl">⛵</span>
+                  <VehicleGlyph type="boat" size={30} />
                   <span className="text-sm font-semibold text-[#0F172A]">Boat</span>
                   <span className="text-[10px] text-[#64748B]">slower</span>
                 </button>
@@ -512,14 +542,18 @@ export default function SearchPlan() {
         {/* animation controls */}
         {teams.length > 0 && (
           <div className="absolute top-4 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
-            <button onClick={() => { if (animStep >= maxLen) setAnimStep(1); setPlaying((p) => !p); }}
+            <button onClick={() => { if (animStep >= animTotal) setAnimStep(1); setPlaying((p) => !p); }}
               className="px-3 py-1.5 text-sm font-semibold bg-[#0F766E] text-white rounded hover:bg-[#115E59]">
-              {playing ? '❚❚ Pause' : (animStep >= maxLen ? '↻ Replay' : '▶ Play')}
+              {playing ? '❚❚ Pause' : (animStep >= animTotal ? '↻ Replay' : '▶ Play')}
             </button>
-            <input type="range" min="1" max={maxLen} value={animStep}
+            <input type="range" min="1" max={animTotal} value={animStep}
               onChange={(e) => { setPlaying(false); setAnimStep(parseInt(e.target.value)); }}
-              className="accent-[#0F766E] w-40" />
-            <span className="text-xs text-[#64748B] font-medium tabular-nums">step {animStep}/{maxLen}</span>
+              className="accent-[#0F766E] w-44" />
+            <span className="text-xs font-medium tabular-nums whitespace-nowrap">
+              {inDrift
+                ? <span className="text-[#2563EB]">Drift T+{replayFrameIdx}h</span>
+                : <span className="text-[#0F766E]">Search {Math.max(1, animStep - driftSteps)}/{maxLen}</span>}
+            </span>
           </div>
         )}
 

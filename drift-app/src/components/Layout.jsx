@@ -21,13 +21,14 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-[#F8F9FA] flex flex-col text-[#0F172A] font-sans">
       <header className="bg-white border-b border-[#E2E8F0] h-16 flex items-center px-6 shrink-0 z-[1000] sticky top-0 relative">
-        <div className="flex items-center gap-2 mr-8">
+        <button type="button" onClick={() => navigate('/')} title="Back to start"
+          className="flex items-center gap-2 mr-8 cursor-pointer hover:opacity-80 outline-none">
           <div className="relative flex items-center justify-center w-8 h-8 bg-[#0F766E] rounded-sm text-white">
             <Waves size={20} />
             <Eye size={12} className="absolute bottom-1 right-1" />
           </div>
           <span className="font-bold text-xl tracking-tight text-[#0F172A]">Nahshol</span>
-        </div>
+        </button>
         
         <nav className="flex-1 flex items-center justify-center">
           <ol className="flex items-center w-full max-w-3xl">
