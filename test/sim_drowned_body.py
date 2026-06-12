@@ -248,16 +248,39 @@ INCIDENT_JSON    = os.path.join(HERE, '..', 'drift-app', 'public', 'incident.jso
 
 rng = np.random.default_rng(42)       # reproducible ensemble
 
+# Drift-diagnostics quiver plot (current vs Stokes vs effective drift). It is a
+# DEV artefact the app never loads, and rendering it re-opens the ~100 MB current
+# and wave subsets on the pipeline's hot path before the run even starts -- so it
+# is OFF by default and only produced when explicitly requested.
+MAKE_DIAGNOSTICS = False
+
 # environment overrides (used by the API / a quick demo without Copernicus):
 #   NAHSHON_SOURCE=offline    -> constant forcing, no download
 #   NAHSHON_PARTICLES=1500    -> smaller, faster ensemble
 #   NAHSHON_CACHE_ONLY=1      -> offline demo: use cached data only, never download
+#   NAHSHON_DIAGNOSTICS=1     -> also render the drift-diagnostics quiver PNG
 if os.environ.get('NAHSHON_SOURCE'):
     SOURCE = os.environ['NAHSHON_SOURCE']
 if os.environ.get('NAHSHON_PARTICLES'):
     N_PARTICLES = int(os.environ['NAHSHON_PARTICLES'])
 if os.environ.get('NAHSHON_CACHE_ONLY') not in (None, '', '0', 'false', 'False'):
     CACHE_ONLY = True
+if os.environ.get('NAHSHON_DIAGNOSTICS') not in (None, '', '0', 'false', 'False'):
+    MAKE_DIAGNOSTICS = True
+
+# Nearshore longshore-current tuning per region/season WITHOUT editing code. The
+# defaults below are the central-Israeli-coast spring calibration (southward on
+# the open Netanya/Herzliya shelf, off toward Haifa Bay); override for elsewhere:
+#   NAHSHON_NEARSHORE_V=0.07          longshore speed m/s (+north / -south, 0=off)
+#   NAHSHON_NEARSHORE_BAND=31.7,32.0  active latitude band "min,max" (or "all")
+if os.environ.get('NAHSHON_NEARSHORE_V') not in (None, ''):
+    NEARSHORE_LONGSHORE_V = float(os.environ['NAHSHON_NEARSHORE_V'])
+_band = os.environ.get('NAHSHON_NEARSHORE_BAND')
+if _band:
+    if _band.strip().lower() in ('all', 'global', 'none'):
+        NEARSHORE_LAT_MIN = NEARSHORE_LAT_MAX = None     # apply everywhere
+    else:
+        NEARSHORE_LAT_MIN, NEARSHORE_LAT_MAX = (float(x) for x in _band.split(','))
 
 
 def _cache_lookup(fname, kind):
@@ -1375,8 +1398,9 @@ def run_pipeline(progress_cb=None, incident=None):
          else 'Initialising model')
     o = build_model()
 
-    # diagnostic quivers of current / Stokes / effective drift (if waves loaded)
-    if getattr(o, '_cur_path', None) and getattr(o, '_wav_path', None):
+    # diagnostic quivers of current / Stokes / effective drift (if waves loaded).
+    # OFF by default (re-opens the big subsets); enable with NAHSHON_DIAGNOSTICS=1.
+    if MAKE_DIAGNOSTICS and getattr(o, '_cur_path', None) and getattr(o, '_wav_path', None):
         try:
             make_drift_diagnostics(o._cur_path, o._wav_path)
         except Exception as exc:

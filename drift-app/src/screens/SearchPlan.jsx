@@ -187,9 +187,24 @@ export default function SearchPlan() {
     if (generating) return;
     setUserVehicles([]);
     setPendingPos(null);
-    setPlanMode('auto');
-    doPlan('auto', [], searchHour);
+    setPlanMode('auto');          // the auto-plan effect below re-plans for us
   };
+
+  // AUTO mode: (re)compute the shore-launch plan on first load and whenever the
+  // search-start hour (forecast slider + deploy delay) changes, so the routes
+  // always match the heatmap underneath. USER mode is driven by the Generate
+  // button instead. doPlan supersedes any in-flight request (reqIdRef/abort),
+  // so dragging the slider just cancels the stale fetch.
+  useEffect(() => {
+    if (planMode !== 'auto' || !driftData) return;
+    // doPlan kicks off an async fetch (its setState is the standard
+    // fetch-on-change pattern; it can't re-trigger this effect since it touches
+    // none of the deps).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    doPlan('auto', [], searchHour);
+    // doPlan omitted from deps: stable setters/refs + context fetchers only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planMode, searchHour, driftData]);
 
   const mapCenter = (incidentData.lat && incidentData.lng)
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
