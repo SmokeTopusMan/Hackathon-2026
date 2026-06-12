@@ -1,5 +1,5 @@
 """
-Nahshon backend API.
+Nahshol backend API.
 
 Bridges the React frontend to the drift simulation + search planner so that
 every run is computed LIVE from the operator's inputs (LKP lon/lat, victim

@@ -2,7 +2,7 @@
 DrownedBodyDrift -- an OpenDrift OceanDrift subclass that models the
 sink -> rest-on-bottom -> refloat -> re-sink cycle of a drowned body.
 
-This is the PHYSICS PRIOR for Nahshon. Unlike Leeway (a surface-only,
+This is the PHYSICS PRIOR for Nahshol. Unlike Leeway (a surface-only,
 wind-driven model), a submerged body is moved by the 3D current AT ITS
 OWN DEPTH and has no windage while underwater. OceanDrift gives us that
 3D advection for free; this subclass adds the vertical *behaviour*.

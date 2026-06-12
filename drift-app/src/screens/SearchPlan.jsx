@@ -192,9 +192,24 @@ export default function SearchPlan() {
     if (generating) return;
     setUserVehicles([]);
     setPendingPos(null);
-    setPlanMode('auto');
-    setPlan(null);
+    setPlanMode('auto');          // the auto-plan effect below re-plans for us
   };
+
+  // AUTO mode: (re)compute the shore-launch plan on first load and whenever the
+  // search-start hour (forecast slider + deploy delay) changes, so the routes
+  // always match the heatmap underneath. USER mode is driven by the Generate
+  // button instead. doPlan supersedes any in-flight request (reqIdRef/abort),
+  // so dragging the slider just cancels the stale fetch.
+  useEffect(() => {
+    if (planMode !== 'auto' || !driftData) return;
+    // doPlan kicks off an async fetch (its setState is the standard
+    // fetch-on-change pattern; it can't re-trigger this effect since it touches
+    // none of the deps).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    doPlan('auto', [], searchHour);
+    // doPlan omitted from deps: stable setters/refs + context fetchers only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planMode, searchHour, driftData]);
 
   const mapCenter = (incidentData.lat && incidentData.lng)
     ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
@@ -250,11 +265,7 @@ export default function SearchPlan() {
       <div className="w-[400px] bg-white border-r border-[#E2E8F0] flex flex-col shrink-0 overflow-y-auto">
 
         <div className="p-6 border-b border-[#E2E8F0]">
-          <h2 className="text-xl font-bold text-[#0F172A] mb-1">Search Plan</h2>
-          <p className="text-xs text-[#64748B] mb-4">
-            Coordinated greedy coverage of the drift heatmap. Teams launch from
-            shore and sweep over water only.
-          </p>
+          <h2 className="text-xl font-bold text-[#0F172A] mb-4">Search Plan</h2>
 
           {/* the plan tracks the heatmap time; adjustable here too */}
           <div className="mb-2 flex justify-between text-sm font-semibold text-[#0F172A]">
@@ -292,11 +303,7 @@ export default function SearchPlan() {
         </div>
 
         <div className="p-6 border-b border-[#E2E8F0]">
-          <h3 className="font-semibold text-[#0F172A] mb-1">Deploy Vehicles</h3>
-          <p className="text-xs text-[#64748B] mb-3">
-            Click anywhere on the map to drop a launch point, then pick the craft.
-            The plan routes the fleet from your points.
-          </p>
+          <h3 className="font-semibold text-[#0F172A] mb-3">Deploy Vehicles</h3>
 
           <div className="mb-3">
             <label className="block text-xs font-medium text-[#0F172A] mb-1">
@@ -356,8 +363,8 @@ export default function SearchPlan() {
               <button
                 type="button"
                 onClick={handleGeneratePlan}
-                disabled={!driftData}
-                className={`flex-1 py-2 text-sm font-medium ${driftData ? 'bg-[#1E5C9E] text-white hover:bg-[#16487C]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+                disabled={!userVehicles.length}
+                className={`flex-1 py-2 text-sm font-medium ${userVehicles.length ? 'bg-[#1E5C9E] text-white hover:bg-[#16487C]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
               >
                 Generate Plan
               </button>
@@ -477,7 +484,7 @@ export default function SearchPlan() {
 
         {/* animation controls */}
         {teams.length > 0 && (
-          <div className="absolute top-4 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
+          <div className="absolute top-14 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
             <button onClick={() => { if (animStep >= animTotal) setAnimStep(1); setPlaying((p) => !p); }}
               className="px-3 py-1.5 text-sm font-semibold bg-[#1E5C9E] text-white rounded hover:bg-[#16487C]">
               {playing ? '❚❚ Pause' : (animStep >= animTotal ? '↻ Replay' : '▶ Play')}
