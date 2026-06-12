@@ -33,7 +33,7 @@ function MapClickHandler({ setPos }) {
 
 export default function IncidentReport() {
   const navigate = useNavigate();
-  const { incidentData, updateIncident, runSimulation, runState } = useIncident();
+  const { incidentData, updateIncident, runSimulation, cancelSimulation, runState } = useIncident();
   const [mapPos, setMapPos] = useState(incidentData.lat && incidentData.lng ? { lat: incidentData.lat, lng: incidentData.lng } : null);
 
   // "Run Simulation" -> run the drift sim LIVE on these inputs and show the
@@ -104,8 +104,8 @@ export default function IncidentReport() {
             <h2 className="text-lg font-semibold border-b border-[#E2E8F0] pb-2 mb-4 text-[#0F766E]">2. Last Seen Point (LSP)</h2>
             
             <div className="flex border border-[#E2E8F0] mb-4">
-              <button type="button" onClick={() => updateIncident({ lspMode: 'coordinates' })} className={`flex-1 py-2 text-sm font-medium ${incidentData.lspMode === 'coordinates' ? 'bg-[#0F766E] text-white' : 'bg-white text-[#64748B] hover:bg-gray-50'}`}>Enter Coordinates</button>
-              <button type="button" onClick={() => updateIncident({ lspMode: 'map' })} className={`flex-1 py-2 text-sm font-medium ${incidentData.lspMode === 'map' ? 'bg-[#0F766E] text-white' : 'bg-white text-[#64748B] hover:bg-gray-50'}`}>Select on Map</button>
+              <button type="button" disabled={runState.running} onClick={() => updateIncident({ lspMode: 'coordinates' })} className={`flex-1 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed ${incidentData.lspMode === 'coordinates' ? 'bg-[#0F766E] text-white' : 'bg-white text-[#64748B] hover:bg-gray-50'}`}>Enter Coordinates</button>
+              <button type="button" disabled={runState.running} onClick={() => updateIncident({ lspMode: 'map' })} className={`flex-1 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed ${incidentData.lspMode === 'map' ? 'bg-[#0F766E] text-white' : 'bg-white text-[#64748B] hover:bg-gray-50'}`}>Select on Map</button>
             </div>
 
             {incidentData.lspMode === 'map' && (
@@ -117,11 +117,11 @@ export default function IncidentReport() {
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
                 <label className="block text-sm font-medium text-[#0F172A] mb-1">Latitude <span className="text-[#DC2626]">*</span></label>
-                <input type="number" step="any" required placeholder="e.g. 32.82" value={incidentData.lat} onChange={e => updateIncident({ lat: e.target.value })} disabled={incidentData.lspMode === 'map'} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none disabled:bg-gray-100 disabled:text-gray-500" />
+                <input type="number" step="any" required placeholder="e.g. 32.82" value={incidentData.lat} onChange={e => updateIncident({ lat: e.target.value })} disabled={incidentData.lspMode === 'map' || runState.running} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none disabled:bg-gray-100 disabled:text-gray-500" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#0F172A] mb-1">Longitude <span className="text-[#DC2626]">*</span></label>
-                <input type="number" step="any" required placeholder="e.g. 34.99" value={incidentData.lng} onChange={e => updateIncident({ lng: e.target.value })} disabled={incidentData.lspMode === 'map'} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none disabled:bg-gray-100 disabled:text-gray-500" />
+                <input type="number" step="any" required placeholder="e.g. 34.99" value={incidentData.lng} onChange={e => updateIncident({ lng: e.target.value })} disabled={incidentData.lspMode === 'map' || runState.running} className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none disabled:bg-gray-100 disabled:text-gray-500" />
               </div>
             </div>
           </section>
@@ -199,14 +199,24 @@ export default function IncidentReport() {
               >
                 {runState.running ? 'Running simulation…' : 'Run Simulation'}
               </button>
-              <button
-                type="button"
-                disabled={!runState.done}
-                onClick={() => navigate('/heatmap')}
-                className={`flex-1 py-3 font-medium transition-colors ${runState.done ? 'bg-[#0F766E] text-white hover:bg-[#115E59]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
-              >
-                Continue →
-              </button>
+              {runState.running ? (
+                <button
+                  type="button"
+                  onClick={cancelSimulation}
+                  className="flex-1 py-3 font-medium transition-colors bg-[#DC2626] text-white hover:bg-[#B91C1C]"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!runState.done}
+                  onClick={() => navigate('/heatmap')}
+                  className={`flex-1 py-3 font-medium transition-colors ${runState.done ? 'bg-[#0F766E] text-white hover:bg-[#115E59]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+                >
+                  Continue →
+                </button>
+              )}
             </div>
           </div>
         </form>
@@ -221,7 +231,7 @@ export default function IncidentReport() {
           />
           <MapGrid />
           <ScaleControl position="bottomright" />
-          {incidentData.lspMode === 'map' && <MapClickHandler setPos={handleMapClick} />}
+          {incidentData.lspMode === 'map' && !runState.running && <MapClickHandler setPos={handleMapClick} />}
           {mapPos && <Marker position={mapPos} icon={customIcon} />}
           {incidentData.lat && incidentData.lng && incidentData.lspMode === 'coordinates' && (
              <Marker position={{ lat: parseFloat(incidentData.lat), lng: parseFloat(incidentData.lng) }} icon={customIcon} />

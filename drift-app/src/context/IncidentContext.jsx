@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, useCallback } from 'react';
+import React, { createContext, useState, useContext, useCallback, useRef } from 'react';
 
 const IncidentContext = createContext();
 
@@ -29,6 +29,8 @@ export const IncidentProvider = ({ children }) => {
   // `done` flips true once a run has fully finished AND its data is loaded; the
   // Incident Report watches it to navigate to the results (robust to promise timing).
   const [runState, setRunState] = useState({ running: false, percent: 0, stage: '', error: null, done: false });
+  const jobIdRef = useRef(null);
+  const cancelledRef = useRef(false);
 
   const updateIncident = (updates) => {
     setIncidentData(prev => ({ ...prev, ...updates }));
@@ -45,6 +47,7 @@ export const IncidentProvider = ({ children }) => {
   // POST the incident, run the drift simulation live, poll progress for the
   // loading bar, then load the fresh result. Returns the drift data on success.
   const runSimulation = useCallback(async (incident) => {
+    cancelledRef.current = false;
     setRunState({ running: true, percent: 0, stage: 'Starting simulation…', error: null, done: false });
     try {
       const start = await fetch(`${API}/simulate`, {
@@ -54,13 +57,20 @@ export const IncidentProvider = ({ children }) => {
       });
       if (!start.ok) throw new Error(`simulate failed (HTTP ${start.status})`);
       const { job_id } = await start.json();
+      jobIdRef.current = job_id;
+      if (cancelledRef.current) {
+        await fetch(`${API}/cancel/${job_id}`, { method: 'POST' }).catch(() => {});
+        return null;
+      }
 
       // poll progress until done
       for (;;) {
         await new Promise(r => setTimeout(r, 700));
+        if (cancelledRef.current) return null;
         const pr = await fetch(`${API}/progress/${job_id}`);
         if (!pr.ok) throw new Error(`progress failed (HTTP ${pr.status})`);
         const st = await pr.json();
+        if (cancelledRef.current) return null;
         setRunState({ running: !st.done, percent: st.percent ?? 0, stage: st.stage ?? '', error: st.error ?? null, done: false });
         if (st.done) {
           if (st.error) throw new Error(st.error);
@@ -92,6 +102,16 @@ export const IncidentProvider = ({ children }) => {
     }
   }, []);
 
+  // Stop polling client-side and ask the backend to kill the running job.
+  const cancelSimulation = useCallback(async () => {
+    cancelledRef.current = true;
+    const jobId = jobIdRef.current;
+    setRunState({ running: false, percent: 0, stage: 'Cancelled', error: null, done: false });
+    if (jobId) {
+      await fetch(`${API}/cancel/${jobId}`, { method: 'POST' }).catch(() => {});
+    }
+  }, []);
+
   // Recompute the coordinated search plan for a specific forecast hour
   // (the hour currently shown on the heatmap). Teams launch from shore.
   const fetchPlanForHour = useCallback(async (hour) => {
@@ -104,7 +124,7 @@ export const IncidentProvider = ({ children }) => {
     <IncidentContext.Provider value={{
       incidentData, updateIncident, reports, addReport, deleteReport,
       driftData, setDriftData, currentHour, setCurrentHour,
-      runState, setRunState, runSimulation, fetchPlanForHour,
+      runState, setRunState, runSimulation, cancelSimulation, fetchPlanForHour,
     }}>
       {children}
     </IncidentContext.Provider>

@@ -91,6 +91,29 @@ def progress(job_id):
     return jsonify(st)
 
 
+@app.post('/api/cancel/<job_id>')
+def cancel(job_id):
+    """Terminate a running simulation subprocess and mark the job cancelled."""
+    job = JOBS.get(job_id)
+    if job is None:
+        return jsonify(error='unknown job'), 404
+    proc = job['proc']
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    try:
+        with open(job['prog'], 'w', encoding='utf-8') as fh:
+            json.dump({'percent': 0.0, 'stage': 'Cancelled', 'done': True,
+                       'error': 'cancelled'}, fh)
+    except OSError:
+        pass
+    return jsonify(status='cancelled', job_id=job_id)
+
+
 @app.get('/api/drift_data')
 def drift_data():
     path = os.path.normpath(sim.APP_JSON)
