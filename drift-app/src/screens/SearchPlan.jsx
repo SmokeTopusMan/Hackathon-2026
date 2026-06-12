@@ -89,7 +89,7 @@ export default function SearchPlan() {
   }, [driftData, setDriftData]);
 
   const frames = driftData?.frames ?? [];
-  const maxHour = frames.length ? frames.length - 1 : 72;
+  const maxHour = frames.length ? frames.length - 1 : 168;
 
   // the plan is (re)computed for the hour currently shown on the heatmap
   const [plan, setPlan] = useState(null);

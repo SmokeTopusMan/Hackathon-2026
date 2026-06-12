@@ -6,3 +6,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Cached Copernicus subsets (large, regenerable)
+test/cache/
+
+# Backend runtime logs
+api/*.log

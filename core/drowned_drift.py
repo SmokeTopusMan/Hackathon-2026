@@ -86,6 +86,64 @@ class DrownedBodyDrift(OceanDrift):
     required_variables = dict(OceanDrift.required_variables)
     required_variables['sea_floor_depth_below_sea_level'] = {'fallback': 100.0}
 
+    # -- effective drift weighting (current vs wave Stokes) ------------------
+    # WHY THIS EXISTS: a body's horizontal motion is current + wave Stokes drift
+    # (+ wind). For a FLOATING object the wave-driven Stokes transport often
+    # DOMINATES the slow background current near shore -- which is why a
+    # current-only model is inaccurate for surface drifters. We therefore form an
+    # *effective* drift  =  weight_current * current  +  weight_stokes * stokes,
+    # with the weights set by the runner (see DRIFT_WEIGHT_* in
+    # test/sim_drowned_body.py). OpenDrift gives us the hooks for free:
+    #   * the ocean current is scaled per-particle by `current_drift_factor`
+    #     (used inside OceanDrift.advect_ocean_current),
+    #   * the Stokes drift is scaled by overriding stokes_drift() below.
+    #
+    # PHYSICS NOTE: down-weighting the current is only appropriate for the AFLOAT
+    # phases (a body AT the surface, where waves act). A SUBMERGED body has no
+    # wave drift and must follow the FULL current -- so when `weight_afloat_only`
+    # is True (default) we apply the weights only to the afloat phases and keep
+    # the submerged phases on the full current. Set it False to weight globally.
+    wave_weighting   = False   # off by default -> identical to plain OceanDrift
+    weight_current   = 1.0     # multiplier on the ocean current (afloat phases)
+    weight_stokes    = 1.0     # multiplier on the wave Stokes drift
+    weight_afloat_only = True  # weight only the surface phases (physically right)
+
+    # -- nearshore (surf-zone) longshore current ----------------------------
+    # A 4.2 km basin model cannot resolve the SURF-ZONE longshore current: the
+    # wave-driven current within a few km of the beach that carries a floating
+    # object ALONG the shore. Along the Israeli coast the NET-ANNUAL longshore
+    # drift is northward, but it reverses SOUTHWARD in spring/summer (the wave-
+    # induced longshore sediment transport studies for the Israeli shelf). We add
+    # it as a signed alongshore (meridional) current that is strong at the coast
+    # and decays offshore, applied to the AFLOAT phases. The sign/magnitude is a
+    # seasonal knob (negative = southward, for the spring case here); offshore
+    # cases are untouched because the term decays to zero away from the beach.
+    nearshore_longshore_v = 0.0   # m/s alongshore near the coast; + north / - south
+    nearshore_scale_km    = 5.0   # offshore e-folding distance of the surf zone
+    nearshore_afloat_boost = 2.0  # a FLOATING body feels the surf-zone current more
+    coast_tangent_e = 0.28        # north-alongshore unit vector (east comp) for the
+    coast_tangent_n = 0.96        #   Israeli central coast (~16 deg tilt from N)
+    # The southward longshore reversal is NOT a basin-wide feature: it is observed
+    # on the open central-shelf (Netanya / Herzliya), while Haifa Bay to the north
+    # -- a curved, sheltered embayment -- keeps the general northward flow. So the
+    # current only acts inside a latitude band, full strength within [lat_min,
+    # lat_max] and tapering linearly to zero over `lat_taper` deg on each side.
+    # Leave lat_min/lat_max = None to apply it everywhere (old behaviour).
+    nearshore_lat_min   = None    # deg N; south edge of the active band
+    nearshore_lat_max   = None    # deg N; north edge of the active band
+    nearshore_lat_taper = 0.15    # deg of smooth roll-off outside the band
+    coast_distance_fn     = None  # callable (lat, lon) -> km to the nearest coast
+    # Only a FLOATING body beaches; a SUBMERGED one drifts along the bottom past
+    # the shore. With coastline_action='previous' OpenDrift bounces everything off
+    # the coast, and we strand only the afloat phases within this distance.
+    strand_afloat_km = 0.3
+
+    def stokes_drift(self, factor=1):
+        """Scale the wave Stokes drift by `weight_stokes` so it can be made the
+        dominant term of the effective drift. OpenDrift already decays Stokes
+        with depth, so the submerged phases barely feel it regardless."""
+        super().stokes_drift(factor=factor * self.weight_stokes)
+
     def update(self):
         # ------------------------------------------------------------------
         # 1. Vertical BEHAVIOUR: set each particle's terminal_velocity and
@@ -123,6 +181,21 @@ class DrownedBodyDrift(OceanDrift):
         just_under = (e.phase == 0) & (e.z >= -SURFACE_EPS)
         e.z[just_under] = -SURFACE_EPS - 0.5
 
+        # --- effective-drift weighting: scale the ocean current --------------
+        # current_drift_factor multiplies the current inside advect_ocean_current
+        # (the Stokes side is scaled in stokes_drift() above). Phases 1 (drowning,
+        # at surface) and 3 (afloat after refloat) are FLOATING -> down-weight the
+        # current so waves dominate. Phases 0/2 are SUBMERGED/rising in the water
+        # column -> keep the FULL current. Set weight_afloat_only=False to apply
+        # the current weight everywhere.
+        if self.wave_weighting:
+            afloat = (e.phase == 1) | (e.phase == 3)
+            if self.weight_afloat_only:
+                e.current_drift_factor[:] = 1.0
+                e.current_drift_factor[afloat] = self.weight_current
+            else:
+                e.current_drift_factor[:] = self.weight_current
+
         # ------------------------------------------------------------------
         # 2. Let OceanDrift do the actual physics: horizontal advection by
         #    the 3D current at each particle's depth, plus vertical motion
@@ -130,21 +203,84 @@ class DrownedBodyDrift(OceanDrift):
         # ------------------------------------------------------------------
         super().update()
 
+        # ------------------------------------------------------------------
+        # 3. Nearshore (surf-zone) longshore current: a signed alongshore current
+        #    for AFLOAT objects close to the beach, decaying offshore (see notes).
+        # ------------------------------------------------------------------
+        if self.nearshore_longshore_v and self.coast_distance_fn is not None:
+            d_km = np.asarray(self.coast_distance_fn(e.lat, e.lon), dtype=float)
+            v = self.nearshore_longshore_v * np.exp(-d_km / self.nearshore_scale_km)
+            # GEOGRAPHIC limit: only let it act inside the central-shelf latitude
+            # band (Netanya area); zero it out toward Haifa Bay, which does not
+            # show the southward reversal. Trapezoidal window in latitude.
+            if self.nearshore_lat_min is not None and self.nearshore_lat_max is not None:
+                t = max(self.nearshore_lat_taper, 1e-6)
+                below = np.clip((e.lat - (self.nearshore_lat_min - t)) / t, 0.0, 1.0)
+                above = np.clip(((self.nearshore_lat_max + t) - e.lat) / t, 0.0, 1.0)
+                v = v * below * above
+            # the longshore current moves bedload (a body rolling on the shallow
+            # bottom) AND floating bodies -- the floating ones a bit more.
+            afloat = (e.phase == 1) | (e.phase == 3)
+            v = v * np.where(afloat, self.nearshore_afloat_boost, 1.0)
+            # follow the COASTLINE TANGENT (Israeli central coast tilts ~16 deg),
+            # so the current runs ALONG the shore instead of into it -- positive v
+            # = north-alongshore (NNE), negative = south-alongshore (SSW).
+            te, tn = self.coast_tangent_e, self.coast_tangent_n
+            dt = self.time_step.total_seconds()
+            coslat = np.maximum(np.cos(np.radians(e.lat)), 1e-6)
+            e.lat += (v * tn * dt) / 110570.0
+            e.lon += (v * te * dt) / (111320.0 * coslat)
+
+        # ------------------------------------------------------------------
+        # 4. Phase-aware beaching. A SUBMERGED body rolls along the bottom and
+        #    drifts PAST the shore (it cannot wash up while it is underwater),
+        #    so with coastline_action='previous' OpenDrift just nudges it back
+        #    to deeper water and it keeps going. Only a FLOATING body actually
+        #    strands -- we deactivate the afloat phases once they reach the surf
+        #    line. This both matches the physics and stops the whole cloud from
+        #    beaching at the entry point before it can travel alongshore.
+        # ------------------------------------------------------------------
+        if self.coast_distance_fn is not None:
+            afloat = (e.phase == 1) | (e.phase == 3)
+            if np.any(afloat):
+                d_km = np.asarray(self.coast_distance_fn(e.lat, e.lon),
+                                  dtype=float)
+                beach = afloat & (d_km < self.strand_afloat_km)
+                if np.any(beach):
+                    self.deactivate_elements(beach, reason='stranded')
+
 
 # ===========================================================================
 # Body size -> vertical dynamics & timing
 # ===========================================================================
 # First-order, documented heuristics. They give physically-sensible TRENDS
 # (leaner = denser = sinks faster & refloats slower; heavier-set = near
-# neutral = sinks slowly & bobs back sooner) without claiming forensic
-# accuracy. Water temperature -- the dominant real driver of refloat time --
-# is still TODO; it would multiply `refloat` in body_dynamics().
+# neutral = sinks slowly & bobs back sooner). Water temperature -- the dominant
+# real driver of WHEN a body refloats -- now drives the refloat time via
+# Accumulated Degree Days (see refloat_days below).
 
 SEAWATER_DENSITY = 1027.0   # kg/m^3, Mediterranean surface (tune for the basin)
 GRAVITY          = 9.81     # m/s^2
 GAS_BUOYANCY     = 12.0     # kg/m^3 effective lift once decomposition-bloated
 _DRAG_CD         = 1.1      # drag coeff of an irregular body
 _AREA_PER_M      = 0.22     # frontal area (m^2) per metre of height, rough
+
+# --- REFLOAT / FLOAT timing, temperature-driven (forensic) -----------------
+# A drowned body sinks, then decomposition gas refloats it after a delay set
+# mostly by WATER TEMPERATURE. Forensic studies put resurfacing at an Accumulated
+# Degree Days (ADD) of ~100-140 deg C-days: ~7-10 d at ~16 C, ~3-7 d at ~21 C,
+# ~1-2 d above ~27 C (justanswer / ScienceDirect ADD studies). We model:
+#       refloat_days ~= ADD_REFLOAT_DEGDAYS / T_water        (x a mild body factor)
+# and then the body FLOATS for a few days (FLOAT_MIN/MAX_DAYS) before gas escapes
+# and it re-sinks. The per-particle SPREAD is wide on purpose so the ensemble
+# surfaces across a range of days -- some bodies are afloat (and wave-driven)
+# during whatever wave window matters, instead of all surfacing at the same hour.
+# TUNE THESE THREE for the basin / season:
+ADD_REFLOAT_DEGDAYS  = 100.0   # deg C-days to reach the bloat/refloat stage
+DEFAULT_WATER_TEMP_C = 19.0    # Mediterranean spring SST used if none supplied
+MIN_WATER_TEMP_C     = 4.0     # floor so cold water doesn't give infinite refloat
+FLOAT_MIN_DAYS       = 2.0     # a refloated body stays up ~2-5 days (temperate)
+FLOAT_MAX_DAYS       = 5.0
 
 
 def estimate_body_density(height_m, weight_kg):
@@ -207,16 +343,41 @@ def drown_delay_seconds(n, max_minutes=30.0, mode_minutes=4.0, rng=None):
     return (mins * 60.0).astype(np.float32)
 
 
-def refloat_time_seconds(n, height_m, weight_kg, rng=None,
-                         water_density=SEAWATER_DENSITY, spread_frac=0.25):
-    """Per-particle submerged duration before refloating, in seconds.
+def refloat_days(water_temp_c=None, height_m=1.75, weight_kg=75.0):
+    """Days a drowned body stays SUBMERGED before decomposition gas refloats it.
 
-    Base value comes from `body_dynamics` (height/weight driven); a +/-
-    `spread_frac` random jitter keeps the ensemble from refloating all at
-    once (which would give an unphysically sharp ring in the heatmap).
+    Temperature-driven via Accumulated Degree Days (resurface at ADD ~100-140
+    deg C-days), with a mild body-buoyancy modulation (leaner = denser = a bit
+    slower; heavier-set = near-neutral = a bit faster). Examples at the default
+    ADD: ~19 C (Israeli spring) -> ~5 d; ~26 C (summer) -> ~4 d; ~14 C -> ~7 d.
     """
-    base = body_dynamics(height_m, weight_kg, water_density)['refloat']
+    T = max(DEFAULT_WATER_TEMP_C if water_temp_c in (None, '') else float(water_temp_c),
+            MIN_WATER_TEMP_C)
+    base = ADD_REFLOAT_DEGDAYS / T
+    body_factor = float(np.clip(
+        body_dynamics(height_m, weight_kg)['refloat'] / 86400.0, 0.6, 1.6))
+    return float(np.clip(base * body_factor, 0.5, 30.0))
+
+
+def refloat_time_seconds(n, height_m, weight_kg, rng=None, water_temp_c=None,
+                         spread_frac=0.4):
+    """Per-particle submerged duration before refloating, in seconds, TEMPERATURE
+    driven (see refloat_days). The wide +/- `spread_frac` jitter spreads the
+    resurfacing across a range of days so the ensemble isn't a single sharp ring
+    and some bodies are afloat during whatever wave window matters."""
+    base = refloat_days(water_temp_c, height_m, weight_kg) * 86400.0
     if rng is None:
         return np.full(n, base, dtype=np.float32)
     jitter = rng.uniform(-spread_frac, spread_frac, size=n)
-    return np.clip(base * (1.0 + jitter), 600.0, None).astype(np.float32)
+    return np.clip(base * (1.0 + jitter), 3600.0, None).astype(np.float32)
+
+
+def surface_time_seconds(n, water_temp_c=None, rng=None,
+                         min_days=FLOAT_MIN_DAYS, max_days=FLOAT_MAX_DAYS):
+    """Per-particle FLOATING duration, in seconds. Once it refloats, a body stays
+    at the surface for DAYS (forensic: ~2-5 d in temperate water) before gas
+    escapes and it re-sinks -- this is the window in which it is wave-driven, so
+    it is deliberately days, not the few hours used previously."""
+    if rng is None:
+        return np.full(n, 0.5 * (min_days + max_days) * 86400.0, dtype=np.float32)
+    return (rng.uniform(min_days, max_days, size=n) * 86400.0).astype(np.float32)

@@ -2,7 +2,7 @@
 Monte Carlo run of the DrownedBodyDrift prior off Haifa, with:
 
   * a STATIC probability heatmap drawn on a real coastline basemap (cartopy)
-  * an INTERACTIVE, time-animated heatmap over the 0-3 day span (folium)
+  * an INTERACTIVE, time-animated heatmap over the 0-7 day span (folium)
 
     python sim_drowned_body.py
 
@@ -36,13 +36,21 @@ from opendrift.readers import reader_global_landmask
 from opendrift.readers import reader_netCDF_CF_generic
 
 from core.drowned_drift import (
-    DrownedBodyDrift, refloat_time_seconds, drown_delay_seconds, body_dynamics,
-    SURFACE_EPS)
+    DrownedBodyDrift, refloat_time_seconds, surface_time_seconds, refloat_days,
+    drown_delay_seconds, body_dynamics, SURFACE_EPS)
 from core.search_planner import (
     Agent, CoveragePlanner, make_reference_grid, reference_cell_label)
 
 OUTDIR = os.path.join(HERE, 'output')
 os.makedirs(OUTDIR, exist_ok=True)
+
+# Persistent cache for the (large, ~100 MB) Copernicus current/wave subsets.
+# Kept SEPARATE from OUTDIR so clearing outputs never wipes the cache, and
+# gitignored. Downloads land here and are reused on every later run with the
+# same inputs -- so a demo of an already-run case (e.g. Netanya) never has to
+# pull data live. See CACHE_ONLY below for a guaranteed-offline demo mode.
+CACHE_DIR = os.path.join(HERE, 'cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # --- run parameters --------------------------------------------------------
 SOURCE        = 'copernicus'             # 'offline' (constant) or 'copernicus' (real 3D)
@@ -71,7 +79,7 @@ DROWN_TIME_MODE_MIN = 4.0            # most-likely time to drown (peak of the pd
 # The drift forecast runs from here for RUN_DURATION. Must fall inside the
 # Copernicus anfc window (~8 months back to a few days ahead of today).
 SEARCH_TIME   = datetime(2026, 6, 8, 6, 0, 0)
-RUN_DURATION  = timedelta(days=3)     # search window
+RUN_DURATION  = timedelta(days=7)     # search window
 TIME_STEP     = 900                   # 15 min integration step
 OUTPUT_STEP   = 3600                  # save a frame every hour
 NCFILE        = os.path.join(OUTDIR, 'drowned.nc')
@@ -84,10 +92,16 @@ NCFILE        = os.path.join(OUTDIR, 'drowned.nc')
 CMEMS_USER        = 'yairtheop1@gmail.com'
 CMEMS_PASS        = '6dewk7ymVUj*j4h'
 MAX_DEPTH_M       = 200.0   # only fetch currents down to here (Haifa shelf is shallow)
-SUBSET_MARGIN_DEG = 0.8     # half-width of the box around the LKP (~75 km of drift room)
+SUBSET_MARGIN_DEG = 1.0     # half-width of the box around the LKP (~95 km of drift
+                            # room -- bigger for the 7-day window so the cloud
+                            # stays inside the downloaded box)
 REFRESH_DATA      = False   # True = always re-download; False = reuse a cached subset
                             # with the SAME params (faster, and never overwrites a
                             # file another run might still hold open on Windows)
+CACHE_ONLY        = False   # True = OFFLINE DEMO mode: never download -- use only
+                            # cached data and raise a clear error if it is missing.
+                            # Also settable via env: NAHSHON_CACHE_ONLY=1. Pre-cache
+                            # a case once online, then demo it with this on.
 
 # --- stochastic forcing (Gaussian noise) -----------------------------------
 # Real drift is noisier than any gridded current field: sub-grid turbulence,
@@ -108,14 +122,59 @@ CURRENT_UNCERTAINTY    = 0.10   # m/s
 HORIZONTAL_DIFFUSIVITY = 10.0   # m^2/s
 
 # --- surface wind & wave (Stokes) drift ------------------------------------
-# A drowned body has NO windage while submerged, but each time it REFLOATS the
-# wind and breaking waves push it -- and that wave/wind-sea transport is what a
-# current-only model misses near shore. We add the Copernicus WAVE product's
-# Stokes drift (VSDX/VSDY); OpenDrift applies it with a depth decay, so it acts
-# on the AFLOAT phases and barely touches the submerged ones. Direct windage
-# needs a separate wind field (ERA5 for past dates / GFS for recent ones), so
-# WIND_DRIFT_FACTOR only takes effect once such a wind reader is added.
+# WHY WAVES MATTER: a drowned body's horizontal motion is the OCEAN CURRENT plus
+# the WAVE STOKES DRIFT (the net mass transport waves carry in their direction of
+# travel) plus wind. A SUBMERGED body has no wave drift, but a FLOATING one does
+# -- and near shore the wave Stokes transport is frequently STRONGER than the slow
+# background current. That is exactly why a current-only model is accurate
+# offshore yet wrong for surface drifters (e.g. the Netanya body that went south
+# while the current ran north). We pull the Copernicus Med WAVE product
+# (MEDSEA_ANALYSISFORECAST_WAV_006_017) and form an EFFECTIVE drift that lets the
+# waves dominate.
 USE_STOKES        = True    # add Copernicus wave Stokes drift (afloat phases)
+
+# EFFECTIVE-DRIFT WEIGHTING (THE ONE PLACE TO TUNE):
+#     effective = DRIFT_WEIGHT_CURRENT * current  +  DRIFT_WEIGHT_STOKES * stokes
+# Defaults make waves the dominant term, per the SAR requirement. Set both to 1.0
+# for the physically-neutral sum (current + full Stokes). These weights flow into
+# DrownedBodyDrift (current scaled via current_drift_factor, Stokes via its
+# stokes_drift() override) and therefore into EVERY downstream product -- the
+# Monte-Carlo cloud, the heatmap, the search plan and the diffusion -- because all
+# of them derive from the single weighted o.run().
+DRIFT_WEIGHT_CURRENT = 0.3   # multiplier on ocean current
+DRIFT_WEIGHT_STOKES  = 0.7   # multiplier on wave Stokes drift
+# Apply the weighting only to the AFLOAT phases (a submerged body must still
+# follow the FULL current). True = physically correct; False = weight globally.
+WAVE_WEIGHT_AFLOAT_ONLY = True
+
+# NEARSHORE (surf-zone) LONGSHORE CURRENT. The 4.2 km Copernicus grid cannot
+# resolve the wave-driven longshore current within a few km of the beach. Along
+# the Israeli coast that nearshore drift is NORTHWARD in the annual mean but
+# reverses SOUTHWARD in spring/summer (Israeli longshore sediment-transport
+# studies). We add it as a signed alongshore current that decays offshore and
+# acts on the AFLOAT phases (see DrownedBodyDrift). Offshore cases are untouched
+# (the term -> 0 away from the beach), so northward open-sea drift stays northward.
+#   NEARSHORE_LONGSHORE_V -- m/s alongshore near the coast; + north / - south.
+#                            0 = off; spring along this coast -> negative (south).
+#   NEARSHORE_SCALE_KM    -- offshore decay distance (surf-zone width).
+# SEASONAL: along the Israeli coast this nearshore drift is SOUTHWARD in spring/
+# summer (negative) and northward in winter. The default is the spring value used
+# for the Netanya case; it decays offshore so open-sea drift is unaffected. For a
+# winter case set it >= 0. Calibrated against the Netanya->Herzliya recovery.
+NEARSHORE_LONGSHORE_V = -0.07
+NEARSHORE_SCALE_KM    = 6.0
+# GEOGRAPHIC EXTENT of the southward nearshore current. It is a central-shelf
+# feature (open Netanya / Herzliya coast). Haifa Bay to the north is a curved,
+# sheltered embayment that keeps the general NORTHWARD flow, so we only apply the
+# southward reversal inside this latitude band and taper it to zero before Haifa.
+# A run anywhere outside the band (e.g. Haifa ~32.8 N) gets no southward push.
+# Set NEARSHORE_LAT_MIN/MAX = None to apply it everywhere (old global behaviour).
+NEARSHORE_LAT_MIN   = 32.05   # deg N (south of Herzliya)
+NEARSHORE_LAT_MAX   = 32.42   # deg N (just north of Netanya)
+NEARSHORE_LAT_TAPER = 0.15    # deg roll-off; ~0 by ~32.6 N, fully off at Haifa
+
+# Direct windage needs a separate wind field (ERA5 for past dates / GFS for recent
+# ones); WIND_DRIFT_FACTOR only takes effect once such a wind reader is added.
 WIND_DRIFT_FACTOR = 0.0     # windage coefficient; needs a wind reader to act
 
 # --- afloat / drowned probability ------------------------------------------
@@ -123,7 +182,7 @@ WIND_DRIFT_FACTOR = 0.0     # windage coefficient; needs a wind reader to act
 # the body is AFLOAT (at the surface -> visible, wind-driftable, spottable) vs
 # SUBMERGED (underwater), measured as the fraction of the ensemble in each
 # state. Useful for deciding when a surface/air search is worthwhile.
-PROB_QUERY_HOURS = [1, 6, 12, 24, 48, 72]
+PROB_QUERY_HOURS = [1, 6, 12, 24, 48, 72, 120, 168]   # spans the 7-day window
 
 # --- heatmap grid ----------------------------------------------------------
 # The static map bins the final particle cloud into square cells and colours
@@ -188,12 +247,39 @@ INCIDENT_JSON    = os.path.join(HERE, '..', 'drift-app', 'public', 'incident.jso
 rng = np.random.default_rng(42)       # reproducible ensemble
 
 # environment overrides (used by the API / a quick demo without Copernicus):
-#   NAHSHON_SOURCE=offline   -> constant forcing, no download
-#   NAHSHON_PARTICLES=1500   -> smaller, faster ensemble
+#   NAHSHON_SOURCE=offline    -> constant forcing, no download
+#   NAHSHON_PARTICLES=1500    -> smaller, faster ensemble
+#   NAHSHON_CACHE_ONLY=1      -> offline demo: use cached data only, never download
 if os.environ.get('NAHSHON_SOURCE'):
     SOURCE = os.environ['NAHSHON_SOURCE']
 if os.environ.get('NAHSHON_PARTICLES'):
     N_PARTICLES = int(os.environ['NAHSHON_PARTICLES'])
+if os.environ.get('NAHSHON_CACHE_ONLY') not in (None, '', '0', 'false', 'False'):
+    CACHE_ONLY = True
+
+
+def _cache_lookup(fname, kind):
+    """Find a cached subset `fname` (in CACHE_DIR, or the legacy OUTDIR) before
+    downloading. Returns the path if a usable cache exists, else None.
+
+      * REFRESH_DATA=True forces a re-download (ignored when CACHE_ONLY).
+      * CACHE_ONLY=True is offline mode: if nothing is cached, raise a clear
+        error instead of hitting the network.
+    """
+    for d in (CACHE_DIR, OUTDIR):
+        p = os.path.join(d, fname)
+        if os.path.exists(p):
+            if REFRESH_DATA and not CACHE_ONLY:
+                return None                      # caller will re-download
+            print(f"  using cached {kind}: {fname}")
+            return p
+    if CACHE_ONLY:
+        raise RuntimeError(
+            f"CACHE_ONLY/offline is on but no cached {kind} is available.\n"
+            f"  missing file: {fname}\n"
+            f"  Fix: run this case once ONLINE (CACHE_ONLY off) to populate "
+            f"{CACHE_DIR}, then demo it offline.")
+    return None
 
 
 def apply_incident(inc):
@@ -264,10 +350,9 @@ def download_currents_subset():
            f"{int(RUN_DURATION.total_seconds()//3600)}h_"
            f"{int(MAX_DEPTH_M)}m_{SUBSET_MARGIN_DEG}")
     fname = f"currents_{key}.nc"
-    path = os.path.join(OUTDIR, fname)
-    if os.path.exists(path) and not REFRESH_DATA:
-        print(f"  reusing cached currents: {fname}")
-        return path
+    hit = _cache_lookup(fname, 'currents')
+    if hit:
+        return hit
 
     print(f"  currents subset: {t0:%Y-%m-%d %H:%M}..{t1:%Y-%m-%d %H:%M} UTC, "
           f"0-{MAX_DEPTH_M:.0f} m, +/-{SUBSET_MARGIN_DEG} deg around LKP -> {fname}")
@@ -281,42 +366,118 @@ def download_currents_subset():
         minimum_depth=0.0, maximum_depth=MAX_DEPTH_M,
         start_datetime=t0.strftime('%Y-%m-%dT%H:%M:%S'),
         end_datetime=t1.strftime('%Y-%m-%dT%H:%M:%S'),
-        output_filename=fname, output_directory=OUTDIR,
+        output_filename=fname, output_directory=CACHE_DIR,
         username=CMEMS_USER, password=CMEMS_PASS,
         overwrite=True, disable_progress_bar=True)
-    return path
+    return os.path.join(CACHE_DIR, fname)
+
+
+# Med WAVE product variables relevant to object transport:
+#   VSDX/VSDY -> Stokes drift east/north (the actual wave mass transport),
+#   VHM0      -> significant wave height (energy/sea state),
+#   VMDR      -> mean wave direction (deg FROM, oceanographic convention),
+#   VPED      -> wave principal/peak direction (deg FROM),
+#   VTPK      -> wave period at the spectral peak (s, for the Stokes estimate).
+WAVE_VARIABLES = ['VSDX', 'VSDY', 'VHM0', 'VMDR', 'VPED', 'VTPK']
+
+
+def estimate_stokes_from_waves(hs, tp, dir_from_deg):
+    """FALLBACK: estimate surface Stokes drift (east, north) from significant
+    wave height `hs` (m), peak period `tp` (s) and mean wave direction
+    `dir_from_deg` (deg the waves come FROM) when the model's VSDX/VSDY are
+    missing. Deep-water surface Stokes for the significant wave:
+        us ~= omega^3 * (Hs/2)^2 / g ,   omega = 2*pi/Tp
+    scaled by ~0.5 because a real spectrum drifts less than a monochromatic one.
+    Direction is the way the waves TRAVEL (= from-direction + 180)."""
+    g = 9.81
+    tp = np.where(np.isfinite(tp) & (tp > 1.0), tp, 6.0)   # guard bad periods
+    omega = 2.0 * np.pi / tp
+    us = 0.5 * omega**3 * (hs / 2.0)**2 / g                # magnitude (m/s)
+    to_rad = np.radians((dir_from_deg + 180.0) % 360.0)    # travel direction
+    return us * np.sin(to_rad), us * np.cos(to_rad)        # east, north
 
 
 def download_waves_subset():
-    """Download surface Stokes drift (VSDX/VSDY) from the Copernicus Med WAVE
-    product for the same box/time as the currents. Stokes drift is the wave-
-    driven mass transport that pushes a FLOATING body downwind; OpenDrift
-    applies it with a depth decay, so only the afloat phases feel it. Same
-    param-named cache as the currents (never overwrites a locked file)."""
+    """Download the Copernicus Med WAVE product (MEDSEA_ANALYSISFORECAST_WAV_006_
+    017) for the same box/time as the currents: Stokes drift VSDX/VSDY plus wave
+    height/direction/period (for diagnostics and the Stokes fallback). Stokes
+    drift is the wave-driven mass transport that pushes a FLOATING body downwind;
+    OpenDrift applies it with a depth decay, so only the afloat phases feel it.
+    Same param-named cache as the currents (never overwrites a locked file).
+
+    If the file lacks VSDX/VSDY (older product / partial coverage) we DERIVE them
+    from wave height + period + direction via estimate_stokes_from_waves and write
+    them in, so OpenDrift always has a Stokes field to read."""
     import copernicusmarine
     t0 = SEARCH_TIME - timedelta(hours=2)
     t1 = SEARCH_TIME + RUN_DURATION + timedelta(hours=2)
     key = (f"{LKP_LAT:.3f}_{LKP_LON:.3f}_{SEARCH_TIME:%Y%m%d%H}_"
            f"{int(RUN_DURATION.total_seconds()//3600)}h_{SUBSET_MARGIN_DEG}")
     fname = f"waves_{key}.nc"
-    path = os.path.join(OUTDIR, fname)
-    if os.path.exists(path) and not REFRESH_DATA:
-        print(f"  reusing cached waves: {fname}")
-        return path
-    print(f"  waves subset (Stokes drift) -> {fname}")
-    copernicusmarine.subset(
+    hit = _cache_lookup(fname, 'waves')
+    if hit:
+        return hit
+    path = os.path.join(CACHE_DIR, fname)
+    print(f"  waves subset (Stokes + height/dir/period) -> {fname}")
+    sub = dict(
         dataset_id='cmems_mod_med_wav_anfc_4.2km_PT1H-i',
-        variables=['VSDX', 'VSDY'],
         minimum_longitude=LKP_LON - SUBSET_MARGIN_DEG,
         maximum_longitude=LKP_LON + SUBSET_MARGIN_DEG,
         minimum_latitude=LKP_LAT - SUBSET_MARGIN_DEG,
         maximum_latitude=LKP_LAT + SUBSET_MARGIN_DEG,
         start_datetime=t0.strftime('%Y-%m-%dT%H:%M:%S'),
         end_datetime=t1.strftime('%Y-%m-%dT%H:%M:%S'),
-        output_filename=fname, output_directory=OUTDIR,
+        output_filename=fname, output_directory=CACHE_DIR,
         username=CMEMS_USER, password=CMEMS_PASS,
         overwrite=True, disable_progress_bar=True)
+    try:
+        copernicusmarine.subset(variables=WAVE_VARIABLES, **sub)
+    except Exception as exc:
+        # an auxiliary variable name may be off for this product version -> keep
+        # the essential Stokes drift so the model still gets the wave push.
+        print(f'  [full wave var set failed ({exc}); fetching VSDX/VSDY only]')
+        copernicusmarine.subset(variables=['VSDX', 'VSDY'], **sub)
+
+    # Fallback: synthesise Stokes from Hs/Tp/direction if the product lacks it.
+    ds = xr.open_dataset(path)
+    if ('VSDX' not in ds or 'VSDY' not in ds) and 'VHM0' in ds:
+        print('  [VSDX/VSDY missing -> estimating Stokes from Hs/Tp/direction]')
+        hs = ds['VHM0']
+        tp = ds['VTPK'] if 'VTPK' in ds else xr.full_like(hs, 6.0)
+        dr = ds['VMDR'] if 'VMDR' in ds else (ds['VPED'] if 'VPED' in ds
+                                              else xr.zeros_like(hs))
+        sx, sy = estimate_stokes_from_waves(hs, tp, dr)
+        sx.attrs['standard_name'] = 'sea_surface_wave_stokes_drift_x_velocity'
+        sy.attrs['standard_name'] = 'sea_surface_wave_stokes_drift_y_velocity'
+        ds = ds.assign(VSDX=sx, VSDY=sy)
+        ds.to_netcdf(path)
+    ds.close()
     return path
+
+
+def _build_coast_distance():
+    """Interpolator (lat, lon) -> distance to the nearest coast in KM over the
+    search box, from the global landmask (offline, no download) + a Euclidean
+    distance transform. Feeds the nearshore longshore-current correction."""
+    from scipy.ndimage import distance_transform_edt
+    from scipy.interpolate import RegularGridInterpolator
+    from global_land_mask import globe
+    n = 260
+    lons = np.linspace(LKP_LON - SUBSET_MARGIN_DEG, LKP_LON + SUBSET_MARGIN_DEG, n)
+    lats = np.linspace(LKP_LAT - SUBSET_MARGIN_DEG, LKP_LAT + SUBSET_MARGIN_DEG, n)
+    LON, LAT = np.meshgrid(lons, lats)                 # (n_lat, n_lon)
+    water = ~globe.is_land(LAT, LON)
+    dy = (lats[1] - lats[0]) * 110.57                  # km per lat cell
+    dx = (lons[1] - lons[0]) * 111.32 * np.cos(np.radians(LKP_LAT))
+    dist_km = distance_transform_edt(water, sampling=[dy, dx])
+    interp = RegularGridInterpolator((lats, lons), dist_km,
+                                     bounds_error=False, fill_value=999.0)
+
+    def fn(lat, lon):
+        lat = np.asarray(lat, dtype=float)
+        lon = np.asarray(lon, dtype=float)
+        return interp(np.column_stack([lat.ravel(), lon.ravel()])).reshape(lat.shape)
+    return fn
 
 
 def build_model():
@@ -328,10 +489,13 @@ def build_model():
     dyn = body_dynamics(BODY_HEIGHT_M, BODY_WEIGHT_KG)
     o.sink_speed = dyn['sink']
     o.rise_speed = dyn['rise']
+    rf_days = refloat_days(WATER_TEMP_C, BODY_HEIGHT_M, BODY_WEIGHT_KG)
     print(f"  body {BODY_HEIGHT_M:.2f} m / {BODY_WEIGHT_KG:.0f} kg "
           f"(BMI {dyn['bmi']:.1f}, density {dyn['density']:.0f} kg/m^3) -> "
-          f"sink {dyn['sink']:.3f} m/s, rise {dyn['rise']:.3f} m/s, "
-          f"refloat ~{dyn['refloat']/3600:.1f} h")
+          f"sink {dyn['sink']:.3f} m/s, rise {dyn['rise']:.3f} m/s")
+    print(f"  water {WATER_TEMP_C if WATER_TEMP_C is not None else 'default ~19'} C "
+          f"-> refloat ~{rf_days:.1f} days, then floats ~2-5 days "
+          f"(wave-driven at the surface)")
 
     o.add_reader(reader_global_landmask.Reader())
 
@@ -346,17 +510,23 @@ def build_model():
         cur_path = download_currents_subset()
         currents = reader_netCDF_CF_generic.Reader(cur_path, name='CMEMS-3D-local')
         o.add_reader(currents)
+        o._cur_path = cur_path          # kept for the drift diagnostics
+        o._wav_path = None
 
         # Bathymetry for sea_floor_depth_below_sea_level so bodies rest on the
         # real seabed instead of the flat 100 m fallback. Static (no time axis),
-        # so a single one-off stream is cheap -- no need to cache it locally.
-        try:
-            bathy = reader_copernicusmarine.Reader(
-                'cmems_mod_med_phy_anfc_4.2km_static',
-                username=CMEMS_USER, password=CMEMS_PASS)
-            o.add_reader(bathy)
-        except Exception as exc:
-            print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
+        # streamed live -- so in CACHE_ONLY (offline) mode we SKIP it (the flat
+        # seabed fallback keeps the demo fully network-free).
+        if CACHE_ONLY:
+            print('  [CACHE_ONLY: skipping live bathymetry, using flat-seabed fallback]')
+        else:
+            try:
+                bathy = reader_copernicusmarine.Reader(
+                    'cmems_mod_med_phy_anfc_4.2km_static',
+                    username=CMEMS_USER, password=CMEMS_PASS)
+                o.add_reader(bathy)
+            except Exception as exc:
+                print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
 
         # Surface WAVE Stokes drift -> the wave/wind-sea push on the AFLOAT
         # phases (OpenDrift decays it with depth, so the submerged phases barely
@@ -366,6 +536,7 @@ def build_model():
                 wav_path = download_waves_subset()
                 waves = reader_netCDF_CF_generic.Reader(wav_path, name='CMEMS-waves')
                 o.add_reader(waves)
+                o._wav_path = wav_path
             except Exception as exc:
                 print('  [wave Stokes unavailable, continuing without it]:', exc)
     else:
@@ -379,7 +550,12 @@ def build_model():
         })
         o.add_reader(const)
 
-    o.set_config('general:coastline_action', 'stranding')
+    # 'previous' (not 'stranding'): OpenDrift bounces EVERYTHING off the coast.
+    # The model itself then strands only the AFLOAT phases at the surf line
+    # (DrownedBodyDrift.update step 4) -- a submerged body must drift past the
+    # shore rather than beach at the entry point. Afloat strandings still get a
+    # 'stranded' status, so the heatmap's shore layer is populated as before.
+    o.set_config('general:coastline_action', 'previous')
     o.set_config('general:seafloor_action', 'lift_to_seafloor')
     o.set_config('drift:vertical_advection', True)
     o.set_config('drift:vertical_mixing', False)
@@ -388,6 +564,38 @@ def build_model():
     # Gaussian noise -> realistic ensemble spread (see top of file to tune).
     o.set_config('drift:current_uncertainty', CURRENT_UNCERTAINTY)
     o.set_config('drift:horizontal_diffusivity', HORIZONTAL_DIFFUSIVITY)
+
+    # EFFECTIVE-DRIFT WEIGHTING: make the waves the dominant term on the afloat
+    # phases. Only enabled when the wave Stokes field actually loaded, so a
+    # current-only run (offline, or no wave product) keeps the FULL current and
+    # behaves exactly as before -> backward compatible (requirement 10).
+    if getattr(o, '_wav_path', None):
+        o.wave_weighting = True
+        o.weight_current = DRIFT_WEIGHT_CURRENT
+        o.weight_stokes = DRIFT_WEIGHT_STOKES
+        o.weight_afloat_only = WAVE_WEIGHT_AFLOAT_ONLY
+        print(f"  effective drift = {DRIFT_WEIGHT_CURRENT:.2f}*current + "
+              f"{DRIFT_WEIGHT_STOKES:.2f}*stokes "
+              f"({'afloat phases only' if WAVE_WEIGHT_AFLOAT_ONLY else 'all phases'})")
+    else:
+        o.wave_weighting = False     # current-only -> unchanged behaviour
+
+    # Coast-distance field: needed both for the nearshore longshore current AND
+    # for the phase-aware afloat beaching, so build it once and always attach it.
+    o.coast_distance_fn = _build_coast_distance()
+
+    # Nearshore surf-zone longshore current (afloat objects near the beach).
+    if NEARSHORE_LONGSHORE_V:
+        o.nearshore_longshore_v = NEARSHORE_LONGSHORE_V
+        o.nearshore_scale_km = NEARSHORE_SCALE_KM
+        o.nearshore_lat_min = NEARSHORE_LAT_MIN
+        o.nearshore_lat_max = NEARSHORE_LAT_MAX
+        o.nearshore_lat_taper = NEARSHORE_LAT_TAPER
+        band = ('everywhere' if NEARSHORE_LAT_MIN is None
+                else f"{NEARSHORE_LAT_MIN}-{NEARSHORE_LAT_MAX} N (off toward Haifa)")
+        print(f"  nearshore longshore current: {NEARSHORE_LONGSHORE_V:+.2f} m/s "
+              f"({'south' if NEARSHORE_LONGSHORE_V < 0 else 'north'}), "
+              f"decay {NEARSHORE_SCALE_KM} km offshore, band {band}")
     return o
 
 
@@ -396,9 +604,10 @@ def seed(o):
     # per-particle uncertain LKP->drown delay (0..30 min) and body-driven timers
     drown   = drown_delay_seconds(N_PARTICLES, DROWN_TIME_MAX_MIN,
                                   DROWN_TIME_MODE_MIN, rng=rng)
+    # refloat is TEMPERATURE-driven (WATER_TEMP_C); the body then FLOATS for days.
     refloat = refloat_time_seconds(N_PARTICLES, BODY_HEIGHT_M, BODY_WEIGHT_KG,
-                                   rng=rng)
-    surface = (rng.uniform(3, 9, N_PARTICLES) * 3600.0).astype(np.float32)
+                                   rng=rng, water_temp_c=WATER_TEMP_C)
+    surface = surface_time_seconds(N_PARTICLES, water_temp_c=WATER_TEMP_C, rng=rng)
     o.seed_elements(
         lon=LKP_LON, lat=LKP_LAT, radius=LKP_RADIUS_M,
         number=N_PARTICLES, time=start, z=0,
@@ -976,6 +1185,65 @@ show(0);
 """
 
 
+def make_drift_diagnostics(cur_path, wav_path):
+    """Diagnostic quivers (req 9): the OCEAN CURRENT, the WAVE STOKES drift, and
+    the combined EFFECTIVE drift the model actually advects with, at the surface
+    (time-averaged over the window). Side by side they show WHY waves can be the
+    dominant transport for a floating object."""
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    dsc = xr.open_dataset(cur_path)
+    depth_dim = 'depth' if 'depth' in dsc.dims else None
+    uo = dsc['uo'].isel({depth_dim: 0}) if depth_dim else dsc['uo']
+    vo = dsc['vo'].isel({depth_dim: 0}) if depth_dim else dsc['vo']
+    uo = uo.mean('time', skipna=True)
+    vo = vo.mean('time', skipna=True)
+    lon = dsc['longitude'].values
+    lat = dsc['latitude'].values
+    dsc.close()
+
+    dsw = xr.open_dataset(wav_path)
+    sx = dsw['VSDX'].mean('time', skipna=True).interp(longitude=lon, latitude=lat)
+    sy = dsw['VSDY'].mean('time', skipna=True).interp(longitude=lon, latitude=lat)
+    dsw.close()
+
+    U, V, SX, SY = uo.values, vo.values, sx.values, sy.values
+    EFX = DRIFT_WEIGHT_CURRENT * U + DRIFT_WEIGHT_STOKES * SX
+    EFY = DRIFT_WEIGHT_CURRENT * V + DRIFT_WEIGHT_STOKES * SY
+
+    LON, LAT = np.meshgrid(lon, lat)
+    stride = max(1, len(lon) // 22)                  # thin arrows for readability
+    panels = [('Ocean current', U, V, '#1f6feb'),
+              ('Wave Stokes drift', SX, SY, '#e36209'),
+              (f'Effective  {DRIFT_WEIGHT_CURRENT:.1f}*cur + '
+               f'{DRIFT_WEIGHT_STOKES:.1f}*stokes', EFX, EFY, '#cf222e')]
+    extent = [lon.min(), lon.max(), lat.min(), max(lat.max(), 35.05)]
+
+    proj = ccrs.PlateCarree()
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6.2),
+                             subplot_kw={'projection': proj})
+    for ax, (title, u, v, color) in zip(axes, panels):
+        # scale each panel to its OWN peak so directions are readable; the peak
+        # magnitude is in the title so the three are still quantitatively comparable.
+        peak = np.nanmax(np.hypot(u, v)) or 0.1
+        ax.set_extent(extent, crs=proj)
+        ax.add_feature(cfeature.LAND.with_scale('10m'), facecolor='#e8e2d0', zorder=1)
+        ax.add_feature(cfeature.OCEAN.with_scale('10m'), facecolor='#dfeefc', zorder=0)
+        ax.coastlines(resolution='10m', linewidth=0.6, zorder=2)
+        ax.quiver(LON[::stride, ::stride], LAT[::stride, ::stride],
+                  u[::stride, ::stride], v[::stride, ::stride], color=color,
+                  transform=proj, scale=peak * 22, width=0.005, zorder=3)
+        ax.plot(LKP_LON, LKP_LAT, marker='*', color='cyan', ms=14, mec='black',
+                transform=proj, zorder=4)
+        ax.set_title(f'{title}\n(peak {peak:.2f} m/s)', fontsize=10)
+    fig.suptitle('Drift field diagnostics (surface, time-averaged)', fontsize=13)
+    out = os.path.join(OUTDIR, 'drift_diagnostics.png')
+    fig.savefig(out, dpi=120, bbox_inches='tight')
+    plt.close(fig)
+    print('  drift diagnostics ->', out)
+
+
 class _ProgressLogHandler(logging.Handler):
     """Parses OpenDrift's 'step i of N' INFO lines into a 0..1 fraction so a
     caller (e.g. the API loading bar) can track the drift run in real time."""
@@ -1014,6 +1282,14 @@ def run_pipeline(progress_cb=None, incident=None):
     p(2, 'Fetching ocean currents' if SOURCE == 'copernicus'
          else 'Initialising model')
     o = build_model()
+
+    # diagnostic quivers of current / Stokes / effective drift (if waves loaded)
+    if getattr(o, '_cur_path', None) and getattr(o, '_wav_path', None):
+        try:
+            make_drift_diagnostics(o._cur_path, o._wav_path)
+        except Exception as exc:
+            print('  [drift diagnostics skipped]:', exc)
+
     p(8, 'Seeding particles')
     seed(o)
 

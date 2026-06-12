@@ -90,7 +90,7 @@ export default function DriftHeatmap() {
   }, [driftData, setDriftData]);
 
   const frames = driftData?.frames ?? [];
-  const maxHour = frames.length ? frames.length - 1 : 72;
+  const maxHour = frames.length ? frames.length - 1 : 168;
 
   const [timeOffset, setTimeOffset] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
