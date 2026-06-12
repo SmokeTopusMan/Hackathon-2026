@@ -39,7 +39,7 @@ export default function MapGrid({ gridSizeKm = 1 }) {
   return (
     <>
       {lines.map((pos, idx) => (
-        <Polyline key={idx} positions={pos} pathOptions={{ color: '#0F766E', weight: 1, opacity: 0.2 }} interactive={false} />
+        <Polyline key={idx} positions={pos} pathOptions={{ color: '#1E5C9E', weight: 1, opacity: 0.2 }} interactive={false} />
       ))}
     </>
   );

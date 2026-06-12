@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #0F766E;
+  --color-primary: #1E5C9E;
   --color-danger: #DC2626;
   --color-background: #F8F9FA;
   --color-surface: #FFFFFF;
@@ -31,7 +31,7 @@ input[type="range"].slider-grab::-webkit-slider-thumb {
   width: 22px;
   height: 22px;
   border-radius: 9999px;
-  background: #0F766E;
+  background: #1E5C9E;
   border: 3px solid #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   cursor: pointer;
@@ -40,7 +40,7 @@ input[type="range"].slider-grab::-moz-range-thumb {
   width: 22px;
   height: 22px;
   border-radius: 9999px;
-  background: #0F766E;
+  background: #1E5C9E;
   border: 3px solid #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   cursor: pointer;

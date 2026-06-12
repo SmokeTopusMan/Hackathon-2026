@@ -140,7 +140,7 @@ export default function DriftHeatmap() {
         <div className="p-4 border-b border-[#E2E8F0]">
           <div className="flex justify-between text-sm font-semibold text-[#0F172A] mb-1">
             <span>Model time:</span>
-            <span className="text-[#0F766E]">T+{timeOffset}h</span>
+            <span className="text-[#1E5C9E]">T+{timeOffset}h</span>
           </div>
           {frame?.label && (
             <p className="text-xs text-[#64748B] mb-3">{frame.label} UTC</p>
@@ -175,7 +175,7 @@ export default function DriftHeatmap() {
         <div className="p-4 mt-auto">
           <button 
             onClick={() => navigate('/search-plan')}
-            className="w-full py-3 bg-white border-2 border-[#0F766E] text-[#0F766E] font-medium hover:bg-[#F0FDFA] transition-colors"
+            className="w-full py-3 bg-white border-2 border-[#1E5C9E] text-[#1E5C9E] font-medium hover:bg-[#EAF2FB] transition-colors"
           >
             Switch to Search Plan →
           </button>
@@ -220,7 +220,7 @@ export default function DriftHeatmap() {
         <div className="absolute top-4 right-4 z-[400] flex flex-col gap-2 mt-10">
           <button 
             onClick={() => setShowHeatmap(!showHeatmap)}
-            className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showHeatmap ? 'bg-white border-[#0F766E] text-[#0F766E]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
+            className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showHeatmap ? 'bg-white border-[#1E5C9E] text-[#1E5C9E]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
           >
             Heatmap: {showHeatmap ? 'ON' : 'OFF'}
           </button>

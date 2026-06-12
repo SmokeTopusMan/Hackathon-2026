@@ -69,9 +69,9 @@ const VEHICLE_LABEL = { jetski: 'Jet-ski', boat: 'Boat' };
 
 // side-view jet-ski: angled handlebar, sleek hull, water spray
 const JETSKI_SVG = '<svg viewBox="0 0 32 24" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">'
-  + '<path d="M19 8 l5 -4" stroke="#0f766e" stroke-width="2.2" stroke-linecap="round" fill="none"/>'
-  + '<path d="M3 13 C5 9 9 8 14 8 L21 8 C24 8 25 10 26 13 C24 16 20 17 14 17 C8 17 5 16 3 13 Z" fill="#0f766e"/>'
-  + '<path d="M12 8 C13 6 17 6 18 8 Z" fill="#0f766e"/>'
+  + '<path d="M19 8 l5 -4" stroke="#1e5c9e" stroke-width="2.2" stroke-linecap="round" fill="none"/>'
+  + '<path d="M3 13 C5 9 9 8 14 8 L21 8 C24 8 25 10 26 13 C24 16 20 17 14 17 C8 17 5 16 3 13 Z" fill="#1e5c9e"/>'
+  + '<path d="M12 8 C13 6 17 6 18 8 Z" fill="#1e5c9e"/>'
   + '<path d="M2 20 q3 2 6 0 t6 0 t6 0 t6 0" stroke="#38bdf8" stroke-width="1.6" fill="none" stroke-linecap="round"/>'
   + '</svg>';
 
@@ -269,7 +269,7 @@ export default function SearchPlan() {
           {/* the plan tracks the heatmap time; adjustable here too */}
           <div className="mb-2 flex justify-between text-sm font-semibold text-[#0F172A]">
             <span>Plan for forecast time</span>
-            <span className="text-[#0F766E]">T+{currentHour}h</span>
+            <span className="text-[#1E5C9E]">T+{currentHour}h</span>
           </div>
           <input type="range" min="0" max={maxHour} step="1" value={currentHour}
             onChange={(e) => setCurrentHour(parseInt(e.target.value))}
@@ -280,9 +280,19 @@ export default function SearchPlan() {
             <div className="flex justify-between"><span className="text-[#64748B]">Converged</span><span className="font-semibold">{plan ? (plan.stop_reason || '–').replace('_', ' ') : '–'}</span></div>
           </div>
 
+          {/* Probability cleared — surfaced up here so it shows the moment a
+              plan is calculated, right beside the mission stats. */}
+          {plan && (
+            <div className="mt-4 rounded-md border border-[#BFD7F0] bg-[#EAF2FB] p-3 text-center">
+              <div className="text-[11px] uppercase tracking-wider text-[#1E5C9E] font-semibold">Probability cleared</div>
+              <div className="text-3xl font-bold text-[#13366A] leading-tight tabular-nums">{plan.total_cleared_pct}%</div>
+              <div className="text-[11px] text-[#64748B]">in {plan.mission_time_min} min mission time</div>
+            </div>
+          )}
+
           {generating && (
-            <div className="mt-4 flex items-center gap-2 text-sm text-[#0F766E]">
-              <span className="inline-block w-4 h-4 border-2 border-[#0F766E] border-t-transparent rounded-full animate-spin"></span>
+            <div className="mt-4 flex items-center gap-2 text-sm text-[#1E5C9E]">
+              <span className="inline-block w-4 h-4 border-2 border-[#1E5C9E] border-t-transparent rounded-full animate-spin"></span>
               Planning for T+{searchHour}h…
             </div>
           )}
@@ -306,10 +316,10 @@ export default function SearchPlan() {
               type="number" min="0" max={maxHour} step="1" value={searchDelayHours}
               onChange={(e) => setSearchDelayHours(Math.max(0, Math.min(maxHour, parseInt(e.target.value) || 0)))}
               disabled={generating}
-              className="w-full p-2 border border-[#E2E8F0] focus:border-[#0F766E] outline-none text-sm disabled:bg-gray-100"
+              className="w-full p-2 border border-[#E2E8F0] focus:border-[#1E5C9E] outline-none text-sm disabled:bg-gray-100"
             />
             <p className="text-[11px] text-[#64748B] mt-1">
-              Search starts at <span className="font-semibold text-[#0F766E]">T+{searchHour}h</span> — the
+              Search starts at <span className="font-semibold text-[#1E5C9E]">T+{searchHour}h</span> — the
               heatmap when the forces actually reach the water.
             </p>
           </div>
@@ -337,7 +347,7 @@ export default function SearchPlan() {
                 <span>{Math.round(genProgress)}%</span>
               </div>
               <div className="w-full bg-[#E2E8F0] h-2 rounded-full overflow-hidden">
-                <div className="bg-[#0F766E] h-full transition-all duration-200 ease-out"
+                <div className="bg-[#1E5C9E] h-full transition-all duration-200 ease-out"
                      style={{ width: `${Math.max(5, genProgress)}%` }}></div>
               </div>
             </div>
@@ -357,7 +367,7 @@ export default function SearchPlan() {
                 type="button"
                 onClick={handleGeneratePlan}
                 disabled={!userVehicles.length}
-                className={`flex-1 py-2 text-sm font-medium ${userVehicles.length ? 'bg-[#0F766E] text-white hover:bg-[#115E59]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
+                className={`flex-1 py-2 text-sm font-medium ${userVehicles.length ? 'bg-[#1E5C9E] text-white hover:bg-[#16487C]' : 'bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed'}`}
               >
                 Generate Plan
               </button>
@@ -370,19 +380,9 @@ export default function SearchPlan() {
           </div>
         </div>
 
-        {plan && (
-          <div className="p-6 bg-[#F8F9FA] flex-1">
-            <div className="bg-teal-50 border border-teal-200 p-4 mb-6">
-              <p className="text-center font-bold text-teal-900 text-lg">
-                Probability cleared in {plan.mission_time_min} min: {plan.total_cleared_pct}%
-              </p>
-            </div>
-          </div>
-        )}
-
         <div className="p-4 mt-auto border-t border-[#E2E8F0] flex-shrink-0">
           <button onClick={() => navigate('/heatmap')}
-            className="w-full py-3 bg-white border-2 border-[#0F766E] text-[#0F766E] font-medium hover:bg-[#F0FDFA] transition-colors">
+            className="w-full py-3 bg-white border-2 border-[#1E5C9E] text-[#1E5C9E] font-medium hover:bg-[#EAF2FB] transition-colors">
             ← Switch to Heatmap
           </button>
         </div>
@@ -465,12 +465,12 @@ export default function SearchPlan() {
               <h4 className="font-bold text-[#0F172A] mb-1 text-center">Choose vehicle type</h4>
               <p className="text-xs text-[#64748B] text-center mb-4">Launch point selected. Pick the craft, or cancel.</p>
               <div className="grid grid-cols-3 gap-3">
-                <button type="button" onClick={() => addVehicle('jetski')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
+                <button type="button" onClick={() => addVehicle('jetski')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#1E5C9E] hover:bg-[#EAF2FB]">
                   <VehicleGlyph type="jetski" size={30} />
                   <span className="text-sm font-semibold text-[#0F172A]">Jet-ski</span>
                   <span className="text-[10px] text-[#64748B]">fast</span>
                 </button>
-                <button type="button" onClick={() => addVehicle('boat')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#0F766E] hover:bg-[#F0FDFA]">
+                <button type="button" onClick={() => addVehicle('boat')} className="flex flex-col items-center gap-1 py-4 border-2 border-[#E2E8F0] rounded-md hover:border-[#1E5C9E] hover:bg-[#EAF2FB]">
                   <VehicleGlyph type="boat" size={30} />
                   <span className="text-sm font-semibold text-[#0F172A]">Boat</span>
                   <span className="text-[10px] text-[#64748B]">slower</span>
@@ -489,16 +489,16 @@ export default function SearchPlan() {
         {teams.length > 0 && (
           <div className="absolute top-4 left-4 z-[400] bg-white border border-[#E2E8F0] shadow-md p-2 flex items-center gap-2">
             <button onClick={() => { if (animStep >= animTotal) setAnimStep(1); setPlaying((p) => !p); }}
-              className="px-3 py-1.5 text-sm font-semibold bg-[#0F766E] text-white rounded hover:bg-[#115E59]">
+              className="px-3 py-1.5 text-sm font-semibold bg-[#1E5C9E] text-white rounded hover:bg-[#16487C]">
               {playing ? '❚❚ Pause' : (animStep >= animTotal ? '↻ Replay' : '▶ Play')}
             </button>
             <input type="range" min="1" max={animTotal} value={animStep}
               onChange={(e) => { setPlaying(false); setAnimStep(parseInt(e.target.value)); }}
-              className="accent-[#0F766E] w-44" />
+              className="accent-[#1E5C9E] w-44" />
             <span className="text-xs font-medium tabular-nums whitespace-nowrap">
               {inDrift
                 ? <span className="text-[#2563EB]">Drift T+{replayFrameIdx}h</span>
-                : <span className="text-[#0F766E]">Search {Math.max(1, animStep - driftSteps)}/{maxLen}</span>}
+                : <span className="text-[#1E5C9E]">Search {Math.max(1, animStep - driftSteps)}/{maxLen}</span>}
             </span>
           </div>
         )}
