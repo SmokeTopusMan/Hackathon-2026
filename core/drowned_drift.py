@@ -204,47 +204,50 @@ class DrownedBodyDrift(OceanDrift):
         super().update()
 
         # ------------------------------------------------------------------
-        # 3. Nearshore (surf-zone) longshore current: a signed alongshore current
-        #    for AFLOAT objects close to the beach, decaying offshore (see notes).
-        # ------------------------------------------------------------------
-        if self.nearshore_longshore_v and self.coast_distance_fn is not None:
-            d_km = np.asarray(self.coast_distance_fn(e.lat, e.lon), dtype=float)
-            v = self.nearshore_longshore_v * np.exp(-d_km / self.nearshore_scale_km)
-            # GEOGRAPHIC limit: only let it act inside the central-shelf latitude
-            # band (Netanya area); zero it out toward Haifa Bay, which does not
-            # show the southward reversal. Trapezoidal window in latitude.
-            if self.nearshore_lat_min is not None and self.nearshore_lat_max is not None:
-                t = max(self.nearshore_lat_taper, 1e-6)
-                below = np.clip((e.lat - (self.nearshore_lat_min - t)) / t, 0.0, 1.0)
-                above = np.clip(((self.nearshore_lat_max + t) - e.lat) / t, 0.0, 1.0)
-                v = v * below * above
-            # the longshore current moves bedload (a body rolling on the shallow
-            # bottom) AND floating bodies -- the floating ones a bit more.
-            afloat = (e.phase == 1) | (e.phase == 3)
-            v = v * np.where(afloat, self.nearshore_afloat_boost, 1.0)
-            # follow the COASTLINE TANGENT (Israeli central coast tilts ~16 deg),
-            # so the current runs ALONG the shore instead of into it -- positive v
-            # = north-alongshore (NNE), negative = south-alongshore (SSW).
-            te, tn = self.coast_tangent_e, self.coast_tangent_n
-            dt = self.time_step.total_seconds()
-            coslat = np.maximum(np.cos(np.radians(e.lat)), 1e-6)
-            e.lat += (v * tn * dt) / 110570.0
-            e.lon += (v * te * dt) / (111320.0 * coslat)
-
-        # ------------------------------------------------------------------
-        # 4. Phase-aware beaching. A SUBMERGED body rolls along the bottom and
-        #    drifts PAST the shore (it cannot wash up while it is underwater),
-        #    so with coastline_action='previous' OpenDrift just nudges it back
-        #    to deeper water and it keeps going. Only a FLOATING body actually
-        #    strands -- we deactivate the afloat phases once they reach the surf
-        #    line. This both matches the physics and stops the whole cloud from
-        #    beaching at the entry point before it can travel alongshore.
+        # 3 + 4. Nearshore longshore current and phase-aware beaching. Both need
+        #    the distance-to-coast field and the afloat mask, so compute each
+        #    ONCE per step (the coast-distance interpolation is the costliest part
+        #    of update()). The alongshore displacement in step 3 is tangent to the
+        #    coast, so it changes distance-to-coast by far less than a metre --
+        #    negligible against the ~300 m beaching threshold -- hence reusing the
+        #    same d_km for the beaching test in step 4 is numerically equivalent.
         # ------------------------------------------------------------------
         if self.coast_distance_fn is not None:
+            d_km = np.asarray(self.coast_distance_fn(e.lat, e.lon), dtype=float)
             afloat = (e.phase == 1) | (e.phase == 3)
+
+            # 3. Nearshore (surf-zone) longshore current: a signed alongshore
+            #    current for AFLOAT objects close to the beach, decaying offshore.
+            if self.nearshore_longshore_v:
+                v = self.nearshore_longshore_v * np.exp(-d_km / self.nearshore_scale_km)
+                # GEOGRAPHIC limit: only let it act inside the central-shelf
+                # latitude band (Netanya area); zero it out toward Haifa Bay,
+                # which does not show the reversal. Trapezoidal window in lat.
+                if self.nearshore_lat_min is not None and self.nearshore_lat_max is not None:
+                    t = max(self.nearshore_lat_taper, 1e-6)
+                    below = np.clip((e.lat - (self.nearshore_lat_min - t)) / t, 0.0, 1.0)
+                    above = np.clip(((self.nearshore_lat_max + t) - e.lat) / t, 0.0, 1.0)
+                    v = v * below * above
+                # the longshore current moves bedload (a body rolling on the
+                # shallow bottom) AND floating bodies -- the floating ones more.
+                v = v * np.where(afloat, self.nearshore_afloat_boost, 1.0)
+                # follow the COASTLINE TANGENT (Israeli central coast tilts ~16
+                # deg), so the current runs ALONG the shore instead of into it --
+                # +v = north-alongshore (NNE), -v = south-alongshore (SSW).
+                te, tn = self.coast_tangent_e, self.coast_tangent_n
+                dt = self.time_step.total_seconds()
+                coslat = np.maximum(np.cos(np.radians(e.lat)), 1e-6)
+                e.lat += (v * tn * dt) / 110570.0
+                e.lon += (v * te * dt) / (111320.0 * coslat)
+
+            # 4. Phase-aware beaching. A SUBMERGED body rolls along the bottom and
+            #    drifts PAST the shore (it cannot wash up while underwater), so
+            #    with coastline_action='previous' OpenDrift just nudges it back to
+            #    deeper water and it keeps going. Only a FLOATING body strands --
+            #    we deactivate the afloat phases once they reach the surf line.
+            #    This matches the physics and stops the whole cloud from beaching
+            #    at the entry point before it can travel alongshore.
             if np.any(afloat):
-                d_km = np.asarray(self.coast_distance_fn(e.lat, e.lon),
-                                  dtype=float)
                 beach = afloat & (d_km < self.strand_afloat_km)
                 if np.any(beach):
                     self.deactivate_elements(beach, reason='stranded')

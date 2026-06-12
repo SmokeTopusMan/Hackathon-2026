@@ -455,6 +455,44 @@ def download_waves_subset():
     return path
 
 
+def download_bathymetry_subset():
+    """Download (and CACHE) the static sea-floor depth for the search box, so
+    bodies rest on the real seabed without a LIVE network read on every run --
+    which is what made each app run stall ('loading currents'). The static
+    product has no time axis, so it is one tiny 2D file per box, reused forever.
+
+    Returns the local path, or None -> the caller then uses the flat-seabed
+    fallback (no network read).
+
+    NOTE: in CACHE_ONLY (offline-demo) mode we deliberately return None and keep
+    the flat-seabed fallback, so the offline demo's result is IDENTICAL to before
+    this caching was added (this stays a pure speed change, not a physics change).
+    The real-seabed path is the LIVE mode, which already read this static field --
+    only now from a tiny local cache instead of a live network stream each run."""
+    if CACHE_ONLY:
+        return None                 # offline demo -> flat seabed, unchanged result
+    fname = f"bathy_{LKP_LAT:.3f}_{LKP_LON:.3f}_{SUBSET_MARGIN_DEG}.nc"
+    for d in (CACHE_DIR, OUTDIR):
+        p = os.path.join(d, fname)
+        if os.path.exists(p) and not REFRESH_DATA:
+            print(f"  using cached bathymetry: {fname}")
+            return p
+    import copernicusmarine
+    path = os.path.join(CACHE_DIR, fname)
+    print(f"  bathymetry subset (static sea-floor depth) -> {fname}")
+    copernicusmarine.subset(
+        dataset_id='cmems_mod_med_phy_anfc_4.2km_static',
+        variables=['deptho'],
+        minimum_longitude=LKP_LON - SUBSET_MARGIN_DEG,
+        maximum_longitude=LKP_LON + SUBSET_MARGIN_DEG,
+        minimum_latitude=LKP_LAT - SUBSET_MARGIN_DEG,
+        maximum_latitude=LKP_LAT + SUBSET_MARGIN_DEG,
+        output_filename=fname, output_directory=CACHE_DIR,
+        username=CMEMS_USER, password=CMEMS_PASS,
+        overwrite=True, disable_progress_bar=True)
+    return path
+
+
 def _build_coast_distance():
     """Interpolator (lat, lon) -> distance to the nearest coast in KM over the
     search box, from the global landmask (offline, no download) + a Euclidean
@@ -506,7 +544,6 @@ def build_model():
         # it with the generic NetCDF reader -- uo/vo carry standard_names, so
         # they are auto-rotated to x/y_sea_water_velocity and interpolated to
         # each particle's depth.
-        from opendrift.readers import reader_copernicusmarine
         cur_path = download_currents_subset()
         currents = reader_netCDF_CF_generic.Reader(cur_path, name='CMEMS-3D-local')
         o.add_reader(currents)
@@ -514,19 +551,19 @@ def build_model():
         o._wav_path = None
 
         # Bathymetry for sea_floor_depth_below_sea_level so bodies rest on the
-        # real seabed instead of the flat 100 m fallback. Static (no time axis),
-        # streamed live -- so in CACHE_ONLY (offline) mode we SKIP it (the flat
-        # seabed fallback keeps the demo fully network-free).
-        if CACHE_ONLY:
-            print('  [CACHE_ONLY: skipping live bathymetry, using flat-seabed fallback]')
-        else:
-            try:
-                bathy = reader_copernicusmarine.Reader(
-                    'cmems_mod_med_phy_anfc_4.2km_static',
-                    username=CMEMS_USER, password=CMEMS_PASS)
+        # real seabed instead of the flat-100 m fallback. The static field is now
+        # CACHED to a tiny local file (download_bathymetry_subset) and read with
+        # the generic NetCDF reader -- no per-run live network read. Offline with
+        # no cached bathy -> flat-seabed fallback (keeps the run network-free).
+        try:
+            bathy_path = download_bathymetry_subset()
+            if bathy_path:
+                bathy = reader_netCDF_CF_generic.Reader(bathy_path, name='CMEMS-bathy')
                 o.add_reader(bathy)
-            except Exception as exc:
-                print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
+            else:
+                print('  [no cached bathymetry offline -> flat-seabed fallback]')
+        except Exception as exc:
+            print('  [bathymetry unavailable, using flat-seabed fallback]:', exc)
 
         # Surface WAVE Stokes drift -> the wave/wind-sea push on the AFLOAT
         # phases (OpenDrift decays it with depth, so the submerged phases barely
@@ -776,18 +813,33 @@ def export_app_json(ncfile, out_path=APP_JSON, max_particles=APP_MAX_PARTICLES,
     si = np.where(has_strand)[0]
     shore_la = [round(float(lat_s[i, strand_step[i]]), 5) for i in si]
     shore_lo = [round(float(lon_s[i, strand_step[i]]), 5) for i in si]
-    shore_step = [int(strand_step[i]) for i in si]
+    shore_step = np.array([int(strand_step[i]) for i in si])
+
+    # Vectorise the per-frame point list: round ONCE for the whole array, then
+    # slice each frame and emit with one .tolist() instead of a Python-level
+    # round(float(...)) per coordinate (~280k calls). Same values, far faster.
+    # cast to float64 BEFORE rounding (the NetCDF arrays are float32; rounding
+    # those leaves representation noise that bloats the JSON) so .tolist() emits
+    # the same clean 5-decimal numbers the old round(float(...)) produced.
+    lat_r = np.round(lat_s.astype(np.float64), 5)
+    lon_r = np.round(lon_s.astype(np.float64), 5)
+    finite_all = np.isfinite(lat_s) & np.isfinite(lon_s)
+    # pre-sort shore landings by the hour they beached, so each frame just takes
+    # the prefix [shore_step <= t] via one searchsorted instead of a full scan.
+    order = np.argsort(shore_step, kind='stable')
+    shore_sorted = [[shore_la[k], shore_lo[k]] for k in order]
+    shore_step_sorted = shore_step[order]
 
     frames = []
     for t in range(ntime):
-        la = lat_s[:, t]
-        lo = lon_s[:, t]
-        good = np.isfinite(la) & np.isfinite(lo)
-        pts = [[round(float(a), 5), round(float(o), 5), intensity]
-               for a, o in zip(la[good], lo[good])]
+        good = finite_all[:, t]
+        la = lat_r[good, t]
+        lo = lon_r[good, t]
+        pts = np.column_stack(
+            [la, lo, np.full(la.shape[0], intensity)]).tolist()
         # every particle beached at or before this hour, at its landing point
-        shore = [[shore_la[k], shore_lo[k]]
-                 for k in range(len(si)) if shore_step[k] <= t]
+        n_shore = int(np.searchsorted(shore_step_sorted, t, side='right'))
+        shore = shore_sorted[:n_shore]
         frames.append({
             'hour': int(round((times[t] - times[0]) / np.timedelta64(1, 'h'))),
             'label': np.datetime_as_string(times[t], unit='m').replace('T', ' '),
