@@ -115,9 +115,6 @@ export default function SearchPlan() {
 
   const [plan, setPlan] = useState(null);
   const [planError, setPlanError] = useState(null);
-  // delay (hours) before the rescue forces actually deploy: the search is planned
-  // on the heatmap at SEARCH START = selected hour + this delay.
-  const [searchDelayHours, setSearchDelayHours] = useState(0);
 
   // user-placed fleet: each vehicle is { id, lat, lng, type }
   const [userVehicles, setUserVehicles] = useState([]);
@@ -129,7 +126,11 @@ export default function SearchPlan() {
   const abortRef = useRef(null);
   const reqIdRef = useRef(0);
 
-  const searchHour = Math.min(currentHour + searchDelayHours, maxHour);
+  // Single source of truth for the time: the "Plan for forecast time" slider
+  // (currentHour, shared with the Heatmap screen). Both the heatmap shown on the
+  // map and the plan generation use exactly this hour — there is no second knob
+  // that can stack on top of it.
+  const searchHour = Math.min(currentHour, maxHour);
 
   // Generate a plan. A request token (reqIdRef) makes Cancel authoritative: a
   // cancelled or superseded run is ignored when it finally settles, so the UI
@@ -274,7 +275,10 @@ export default function SearchPlan() {
           </div>
           <input type="range" min="0" max={maxHour} step="1" value={currentHour}
             onChange={(e) => setCurrentHour(parseInt(e.target.value))}
-            className="w-full slider-grab mb-4" />
+            className="w-full slider-grab mb-2" />
+          <p className="text-[11px] text-[#64748B] mb-4">
+            Both the drift heatmap and the generated plan use this time.
+          </p>
 
           <div className="space-y-2 text-sm">
             <div className="flex justify-between"><span className="text-[#64748B]">Mission time</span><span className="font-semibold">{plan ? `${plan.mission_time_min} min` : '–'}</span></div>
@@ -304,22 +308,6 @@ export default function SearchPlan() {
 
         <div className="p-6 border-b border-[#E2E8F0]">
           <h3 className="font-semibold text-[#0F172A] mb-3">Deploy Vehicles</h3>
-
-          <div className="mb-3">
-            <label className="block text-xs font-medium text-[#0F172A] mb-1">
-              Force deployment delay (hours)
-            </label>
-            <input
-              type="number" min="0" max={maxHour} step="1" value={searchDelayHours}
-              onChange={(e) => setSearchDelayHours(Math.max(0, Math.min(maxHour, parseInt(e.target.value) || 0)))}
-              disabled={generating}
-              className="w-full p-2 border border-[#E2E8F0] focus:border-[#1E5C9E] outline-none text-sm disabled:bg-gray-100"
-            />
-            <p className="text-[11px] text-[#64748B] mt-1">
-              Search starts at <span className="font-semibold text-[#1E5C9E]">T+{searchHour}h</span> — the
-              heatmap when the forces actually reach the water.
-            </p>
-          </div>
 
           {userVehicles.length > 0 ? (
             <div className="space-y-1 mb-3">
@@ -418,9 +406,9 @@ export default function SearchPlan() {
           {/* coarse labelled comms grid (A,B,C.. / 1,2,3..) for the teams */}
           <ReferenceGrid grid={plan?.reference_grid} />
 
-          {/* LKP marker = the coordinates entered in the Incident Report */}
+          {/* LSP marker = the coordinates entered in the Incident Report */}
           <Marker position={mapCenter} icon={lspIcon}>
-            <Tooltip permanent direction="top" offset={[0, -30]} className="font-bold">LKP</Tooltip>
+            <Tooltip permanent direction="top" offset={[0, -30]} className="font-bold">LSP</Tooltip>
           </Marker>
 
           {/* Animated coordinated team paths (shore -> sea): the search

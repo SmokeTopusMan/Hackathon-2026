@@ -191,10 +191,10 @@ export default function DriftHeatmap() {
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
 
-          {/* LKP marker — prefer the position the simulation actually used */}
+          {/* LSP marker — prefer the position the simulation actually used */}
           {driftData?.lkp ? (
             <Marker position={[driftData.lkp.lat, driftData.lkp.lon]} icon={customIcon}>
-              <Tooltip permanent direction="top" offset={[0, -36]}>LKP</Tooltip>
+              <Tooltip permanent direction="top" offset={[0, -36]}>LSP</Tooltip>
             </Marker>
           ) : (incidentData.lat && incidentData.lng && (
             <Marker position={[parseFloat(incidentData.lat), parseFloat(incidentData.lng)]} icon={customIcon} />
