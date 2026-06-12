@@ -1,163 +1,249 @@
 <div align="center">
 
-![Nahshol](hacklogo.png)
+![Project Logo](hacklogo.png)
 
-# 🌊 Nahshol · נחשול
+# 🌊 נחשול · Nahshol
 
-### Drift simulation & coordinated search-route planning for maritime rescue
+### Probabilistic drift modeling & coordinated search planning for maritime SAR
 
 *Nahshol (נחשול) — "a surging swell of the sea."*
 
-When someone goes under near the shore, every hour and every square metre matters.
-**Nahshol** simulates where a drowned body drifts beneath the surface — hour by hour —
-and then plans the routes a rescue fleet should sweep to clear the most probable water
-in the least time.
+When someone is lost beneath the waves, every hour and every square meter matters.  
+**Nahshol** turns real ocean physics into a living heatmap — and tells each rescue team exactly where to search next.
 
 <br>
 
-![Status](https://img.shields.io/badge/status-POC%20·%20demo--ready-2ea043)
-![Domain](https://img.shields.io/badge/domain-maritime%20rescue-1e5c9e)
-![Drift engine](https://img.shields.io/badge/drift%20engine-OpenDrift%20OceanDrift-1e5c9e)
-![Planner](https://img.shields.io/badge/planner-coordinated%20coverage-1e5c9e)
-![Stack](https://img.shields.io/badge/stack-React%20%2B%20Flask-13366a)
+![Status](https://img.shields.io/badge/status-POC%20demo--ready-2ea043?style=flat-square)
+![Domain](https://img.shields.io/badge/domain-search%20%26%20rescue-0a7ea4?style=flat-square)
+![Engine](https://img.shields.io/badge/drift%20engine-OpenDrift-1f6feb?style=flat-square)
+![Data](https://img.shields.io/badge/ocean%20data-Copernicus%20Marine-00b4d8?style=flat-square)
+![Frontend](https://img.shields.io/badge/frontend-React%2019%20%2B%20Leaflet-61dafb?style=flat-square)
+![Backend](https://img.shields.io/badge/backend-Flask-black?style=flat-square)
 
 </div>
 
 ---
 
-## What Nahshol does
+## What it does
 
-Nahshol is a **decision-support tool** for drowning incidents on the Israeli coast. It does
-two things, end to end, live from the operator's inputs:
+Most drift tools model floating debris or life rafts. **Nahshol is built for the hardest case** — a submerged body near the Israeli coast — where wind no longer applies and the only forces are slow, hidden subsurface currents.
 
-1. **Simulates the drift** of a submerged body from the last-known point — a physics
-   ensemble that produces an hour-by-hour probability heatmap of where the body is likely
-   to be.
-2. **Plans the search** — routes a fleet of rescue craft (jet-skis, boats) so they cover
-   the most probable water as fast as possible, and reports how much probability they clear.
+Given a last-known position and a victim profile, Nahshol:
 
-It is **not** a generic surface-drift model. It is built for the hardest case: a body
-**below the surface**, where wind and waves no longer apply and only the slow currents at
-depth move it.
+1. **Simulates** 10,000 virtual particles through real 3D ocean currents using a physics-based 4-phase body model (drowning → submerged → refloat → surface drift)
+2. **Renders** a time-evolving probability heatmap over the next 7 days, frame by frame
+3. **Plans** optimally coordinated search paths for a heterogeneous fleet (boats, jet-skis) that maximizes probability cleared per hour
+
+All of this runs end-to-end from a single incident form in a web browser.
 
 ---
 
-## The operator flow
-
-Three screens, left to right — the way an operator actually uses it:
-
-| Step | Screen | What happens |
-|---|---|---|
-| **1** | **Incident Report** | Enter the last-seen point (type coordinates or click the map), time, and victim profile (height / weight / age). Press **Run Simulation** — the drift model runs live with a progress bar. |
-| **2** | **Drift Heatmap** | Scrub an hour-by-hour slider over the probability heatmap. See the split between **afloat / submerged / stranded**, and bodies accumulating on the shore. |
-| **3** | **Search Plan** | A coordinated plan appears over the chosen hour: teams launch from shore and sweep over water only. Drop your own vehicles to re-plan from real launch points. Read the **probability cleared** and mission time, and replay the drift + search as an animation. |
-
----
-
-## How it works
-
-### 1 · The physics — `DrownedBodyDrift`
-
-An [OpenDrift](https://github.com/OpenDrift/opendrift) `OceanDrift` subclass that models the
-full **sink → rest-on-bottom → refloat → re-sink** cycle of a drowned body. OceanDrift gives
-the 3D current advection *at the body's own depth*; Nahshol adds the vertical behaviour:
-
-- A **state machine** per particle — drowning → submerged → rising → at-surface — so a body
-  can surface, drift, and re-sink several times across a long search window (exactly what SAR
-  teams report).
-- **Body-size physics** — the victim's height and weight set buoyancy and timing
-  (BMI → body-fat → density). Leaner bodies sink faster and refloat later; heavier-set bodies
-  bob back up sooner.
-- A **Monte Carlo ensemble** of thousands of particles released from the last-known point with
-  realistic uncertainty in position and time → the probability heatmap.
-
-### 2 · The planner — coordinated coverage
-
-Heterogeneous multi-agent **probabilistic coverage path planning** over the heatmap:
-
-- **Real units** — each craft carries a real speed (m/s) and sonar radius (m); a fast jet-ski
-  covers more water per minute than a slow boat, and route length / ETA come out in metres and
-  minutes.
-- **Coordinated greedy** — the coverage objective is monotone-submodular, so a greedy rule is
-  provably within (1 − 1/e) ≈ 63% of optimal; agents decide sequentially and commit scanned
-  cells so they spread out without colliding.
-- **Shore-aware** — teams launch from land and sweep over water only; a labelled reference grid
-  (rows A, B, C… / columns 1, 2, 3…) gives crews a shared "B-4" map language.
-- **Converges** — planning stops when target coverage is reached or improvement saturates, so
-  routes don't wander once the area is effectively cleared.
-
----
-
-## Architecture
+## System architecture
 
 ```
-  React UI (Vite + Leaflet)                  Python backend (Flask)
-  ┌───────────────────────┐   POST /api/simulate   ┌──────────────────────────────┐
-  │ Incident Report  ─────────────────────────────▶│ background run:               │
-  │ Drift Heatmap    ◀──── GET /api/drift_data ─────│  test/sim_drowned_body.py     │
-  │ Search Plan      ◀──── GET /api/plan?hour=H ────│   • core/drowned_drift.py     │  physics
-  └───────────────────────┘   GET /api/progress/<id>│   • core/search_planner.py    │  planner
-                                                    └──────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        React Frontend (Vite)                    │
+│                                                                 │
+│  IncidentReport ──▶ DriftHeatmap (time-slider) ──▶ SearchPlan  │
+│     form input         heatmap + shore overlay    fleet paths   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │  POST /api/simulate
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                        Flask API  (server.py)                    │
+│  /api/simulate  ·  /api/progress  ·  /api/drift_data  ·  /api/plan│
+└──────────────────────────────┬───────────────────────────────────┘
+                               │  subprocess
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  Simulation Orchestrator                          │
+│                  (test/sim_drowned_body.py)                       │
+│                                                                  │
+│  1. Download Copernicus Marine 3D currents + Stokes drift        │
+│  2. Run DrownedBodyDrift  (core/drowned_drift.py)                │
+│     └─ OpenDrift subclass · 10k particles · 15-min timesteps     │
+│  3. Bin particle cloud → hourly heatmap frames (300 m cells)     │
+│  4. Run CoveragePlanner  (core/search_planner.py)                │
+│     └─ Greedy submodular · heterogeneous fleet · real SI units   │
+│  5. Export  drift_data.json  →  drift-app/public/               │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | Tooling |
+---
+
+## Physics: the 4-phase body model
+
+`core/drowned_drift.py` implements a custom OpenDrift subclass where each of the 10,000 particles independently cycles through four phases:
+
+```
+  Phase 1 · DROWNING     (0 – 30 min, stochastic)
+  ─────────────────────────────────────────────────
+  Particle is at the surface, drifting with
+  70% Stokes wave drift + 30% subsurface current.
+  Sinking begins after a random delay.
+
+       │
+       ▼ sink at 0.3 m/s
+
+  Phase 0 · SUBMERGED
+  ─────────────────────────────────────────────────
+  Particle rests on the seabed or drifts slowly
+  with 3D bottom currents. Beaching disabled —
+  submerged bodies roll past the shore.
+
+       │
+       ▼ refloat after ~100–140 Accumulated Degree Days
+         (temperature-driven forensic model)
+
+  Phase 2 · RISING       (rise at ~0.2 m/s)
+  ─────────────────────────────────────────────────
+  Gas produced by decomposition overcomes body
+  density, lifting it toward the surface.
+
+       │
+       ▼
+
+  Phase 3 · AT SURFACE   (2 – 5 days, then re-sinks)
+  ─────────────────────────────────────────────────
+  Floating body drifts with wave dominance.
+  Can beach on the shoreline.
+```
+
+**Body dynamics** are victim-specific: height/weight → BMI → fat fraction (Deurenberg formula) → body density (Siri model) → sink/rise speeds clamped to physically plausible ranges.
+
+---
+
+## Search planning
+
+`core/search_planner.py` runs a **coordinated greedy coverage planner** across the heatmap:
+
+- **Algorithm**: Sequential submodular greedy — each agent commits its path in turn, conditioning the next agent's choices on what was already cleared. Achieves ~63%+ of the optimal joint solution.
+- **Movement**: 8-connected grid (N/NE/E/.../stay), hard sonar clearing (scanned cells → 0), real distance budget per vehicle.
+- **Fleet**: `Boat` (7 m/s, 80 m sonar swath) and `Jet-ski` (14 m/s, 40 m swath) with per-vehicle paths, time, and distance outputs in SI units.
+- **Reference grid**: Auto-generated comms grid (rows A–Z, columns 1–N) at 500 m cells for radio coordination.
+- **Convergence**: Planning stops when coverage target is hit, marginal gain saturates, or max time is exceeded — not at a fixed step count.
+
+Users can click the map in the frontend to place additional vehicles; the API replans in real time via `POST /api/plan`.
+
+---
+
+## Tech stack
+
+| Layer | Technology |
 |---|---|
-| Frontend | React + Vite + React-Leaflet, Tailwind |
-| Backend | Flask (`api/server.py`) — runs each simulation as an isolated subprocess |
-| Drift physics | OpenDrift `OceanDrift` subclass (`core/drowned_drift.py`) |
-| Search planner | Coordinated greedy coverage (`core/search_planner.py`) |
-| Ocean / wave data | Copernicus Marine (CMEMS); offline mode for fast demos |
+| **Drift physics** | [OpenDrift](https://github.com/OpenDrift/opendrift) — custom `DrownedBodyDrift` subclass |
+| **Ocean data** | [Copernicus Marine (CMEMS)](https://marine.copernicus.eu/) — 3D currents + wave Stokes drift via `xarray` / NetCDF |
+| **Scientific computing** | NumPy · SciPy · scikit-learn |
+| **Backend API** | Flask + Flask-CORS |
+| **Frontend** | React 19 · Vite 8 · React Router 7 · Tailwind CSS 4 |
+| **Map & heatmap** | Leaflet · leaflet.heat · react-leaflet |
+| **Visualization (dev)** | Folium · Cartopy · Matplotlib |
 
 ---
 
-## Run it
+## Running the project
 
-Two servers:
+### Prerequisites
 
 ```bash
-# 1) Backend — Flask on :5000
-python api/server.py
+# Python (simulation + API)
+pip install opendrift flask flask-cors numpy scipy scikit-learn xarray netcdf4
 
-# 2) Frontend — Vite on :5173 (proxies /api → :5000)
-cd drift-app
-npm install
-npm run dev
+# Node (frontend)
+cd drift-app && npm install
 ```
 
-**Fast offline demo** (no Copernicus download — great for a presentation):
+### Start the API
 
 ```bash
-# constant forcing, smaller ensemble → runs in seconds
+cd api
+python server.py
+# Listening on http://localhost:5000
+```
+
+**Fast offline demo** (no Copernicus download — runs in seconds, ideal for a live presentation):
+
+```bash
 NAHSHON_SOURCE=offline NAHSHON_PARTICLES=1200 python api/server.py
 ```
 
-A live Copernicus run (the default) downloads a current/wave subset and takes a few minutes.
+### Start the frontend
+
+```bash
+cd drift-app
+npm run dev
+# Opens http://localhost:5173
+```
+
+Fill in the incident form, submit, and watch the simulation run. The heatmap and search plan update automatically when processing completes.
 
 ---
 
-## Roadmap
+## Repository layout
 
-What's built today is the **simulate → plan** loop above. Next:
+```
+Hackathon-2026/
+├── core/
+│   ├── drowned_drift.py        # Physics: 4-phase body model (OpenDrift subclass)
+│   ├── search_planner.py       # Greedy coordinated coverage planner
+│   └── joint_search_planner.py # Brute-force heading planner (experimental)
+├── test/
+│   └── sim_drowned_body.py     # Simulation orchestrator + global config
+├── api/
+│   └── server.py               # Flask API (simulate / progress / drift_data / plan)
+├── drift-app/
+│   └── src/
+│       ├── screens/
+│       │   ├── IncidentReport.jsx  # Incident form + sim progress bar
+│       │   ├── DriftHeatmap.jsx    # Time-slider heatmap + shore overlay
+│       │   └── SearchPlan.jsx      # Animated fleet deployment + user vehicle placement
+│       └── context/
+│           └── IncidentContext.jsx # Global state: polling, drift data, plan fetching
+└── evidence/                   # Bayesian fusion layer (planned, not yet implemented)
+```
 
-- [ ] **Bayesian fusion layer** — fold eyewitness sightings and local fishermen's knowledge into the prior as soft likelihoods.
-- [ ] **Sonar-sweep ingestion** — treat a sweep that finds *nothing* as information too (down-weight searched water by probability of detection).
-- [ ] **Water-temperature** in the refloat-timing model (the dominant real driver).
-- [ ] Move CMEMS credentials out of source into env / login.
-- [ ] Field validation with rescue teams.
+---
+
+## What's working · what's next
+
+| Feature | Status |
+|---|---|
+| 4-phase body drift physics | ✅ |
+| 10k-particle Monte Carlo ensemble | ✅ |
+| Real Copernicus Marine ocean data | ✅ |
+| Time-evolving probability heatmap | ✅ |
+| Heterogeneous fleet search planning | ✅ |
+| User vehicle placement + live replanning | ✅ |
+| Shore-stranding detection & overlay | ✅ |
+| Bayesian sonar-miss fusion | 🔲 planned |
+| Eyewitness / local-knowledge soft priors | 🔲 planned |
+| Wind drift (ERA5/GFS integration) | 🔲 planned |
+| Field validation with rescue teams | 🔲 planned |
+
+---
+
+## Why physics, not neural networks?
+
+The physics of how subsurface currents move objects is well understood — and real drowning cases with verified recovery locations are rare. There isn't enough labeled data to relearn hydrodynamics from scratch, and a physics model generalizes to conditions it has never seen. **Nahshol keeps the physics** and reserves machine learning for where data actually accumulates: sonar detection-probability calibration and local current bias correction.
+
+---
+
+## Built for the Eastern Mediterranean
+
+- **Microtidal sea** — the Mediterranean has negligible tides, sidestepping the tidal-reversal complexity of Atlantic SAR models
+- **Wave dominance** — afloat phases use 70% Stokes / 30% current weighting, tuned for Israeli coastal dynamics
+- **Regional data pipeline** — ingests Copernicus Marine CMEMS subsets for the Eastern Med at runtime
 
 ---
 
 ## ⚠️ Disclaimer
 
-Nahshol is a **decision-support tool**, not a replacement for trained search-and-rescue
-judgement. Its predictions are probabilistic and depend on the quality of input data.
-**All search decisions remain with qualified rescue professionals.** Under active
-development; not yet validated for operational use.
+Nahshol is a **decision-support tool**, not a replacement for trained SAR judgment. Its predictions are probabilistic and depend on input data quality. All search decisions remain with qualified rescue professionals. This is a proof-of-concept demo for evaluation, not yet validated for operational use.
 
 ---
 
 <div align="center">
 
-*Built to bring people home from the sea.* 🕊️
+*Built to bring people home from the sea.*
 
 </div>
