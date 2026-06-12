@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useIncident } from '../context/IncidentContext';
-import { MapContainer, TileLayer, Marker, Circle, useMap, useMapEvents, Tooltip } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, useMap, Tooltip } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet.heat';
 
@@ -53,15 +53,6 @@ function MapTooltip() {
   return null;
 }
 
-function MapClickHandler({ onMapClick }) {
-  useMapEvents({
-    click(e) {
-      onMapClick(e.latlng);
-    },
-  });
-  return null;
-}
-
 export default function DriftHeatmap() {
   const navigate = useNavigate();
   const { incidentData, driftData, setDriftData, setCurrentHour, setRunState } = useIncident();
@@ -94,7 +85,6 @@ export default function DriftHeatmap() {
 
   const [timeOffset, setTimeOffset] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
-  const [showScanned, setShowScanned] = useState(true);
   const [showShore, setShowShore] = useState(true);
 
   // keep the slider within the available frames once data loads
@@ -109,40 +99,11 @@ export default function DriftHeatmap() {
 
   const frame = frames[timeOffset] ?? null;
 
-  const [scannedAreas, setScannedAreas] = useState([]);
-
-  const [showScanForm, setShowScanForm] = useState(false);
-  const [isSelectingLocation, setIsSelectingLocation] = useState(false);
-  const [newScanPos, setNewScanPos] = useState(null);
-  const [newScan, setNewScan] = useState({ team: '', time: '', radius: 500 });
-
   const mapCenter = driftData?.lkp
     ? [driftData.lkp.lat, driftData.lkp.lon]
     : (incidentData.lat && incidentData.lng)
       ? [parseFloat(incidentData.lat), parseFloat(incidentData.lng)]
       : [32.82, 34.99];
-
-  const handleAddScan = (e) => {
-    e.preventDefault();
-    if (newScan.team && newScanPos) {
-      setScannedAreas([
-        ...scannedAreas, 
-        { 
-          id: Date.now(), 
-          team: newScan.team, 
-          time: newScan.time || '16:00 - 17:00', 
-          center: [newScanPos.lat, newScanPos.lng],
-          radius: newScan.radius 
-        }
-      ]);
-      setNewScan({ team: '', time: '', radius: 500 });
-      setNewScanPos(null);
-      setIsSelectingLocation(false);
-      setShowScanForm(false);
-    } else if (!newScanPos) {
-      alert("Please select a location on the map first.");
-    }
-  };
 
   const heatmapPoints = useMemo(() => frame?.points ?? [], [frame]);
   // beached-body locations, accumulated up to this hour (carried forward by the sim)
@@ -189,7 +150,7 @@ export default function DriftHeatmap() {
             min="0" max={maxHour} step="1"
             value={timeOffset}
             onChange={(e) => setTimeOffset(parseInt(e.target.value))}
-            className="w-full accent-[#0F766E]"
+            className="w-full slider-grab"
           />
           {frame && (
             <div className="mt-3 text-xs space-y-1">
@@ -208,46 +169,7 @@ export default function DriftHeatmap() {
           )}
         </div>
 
-        <div className="p-4 border-b border-[#E2E8F0] flex-1 flex flex-col">
-          <h3 className="text-sm font-semibold text-[#0F172A] mb-3">Logged Scans</h3>
-          
-          <div className="space-y-2 mb-4 overflow-y-auto max-h-40">
-            {scannedAreas.map(area => (
-              <div key={area.id} className="text-xs p-2 border border-[#E2E8F0] bg-gray-50 flex justify-between items-center">
-                <div>
-                  <p className="font-semibold text-[#0F172A]">{area.team}</p>
-                  <p className="text-[#64748B]">{area.time} • R={area.radius}m</p>
-                </div>
-                <div className="w-3 h-3 bg-green-200 border border-green-400 rounded-sm"></div>
-              </div>
-            ))}
-          </div>
-
-          {showScanForm ? (
-            <form onSubmit={handleAddScan} className="bg-gray-50 p-3 border border-[#E2E8F0] text-sm mt-2">
-              <input type="text" placeholder="Team Name (e.g. Team C)" required value={newScan.team} onChange={e => setNewScan({...newScan, team: e.target.value})} className="w-full mb-2 p-2 border border-[#E2E8F0] outline-none" />
-              <input type="text" placeholder="Time (e.g. 16:00 - 17:30)" value={newScan.time} onChange={e => setNewScan({...newScan, time: e.target.value})} className="w-full mb-2 p-2 border border-[#E2E8F0] outline-none" />
-              <input type="number" placeholder="Radius (m)" value={newScan.radius} onChange={e => setNewScan({...newScan, radius: parseInt(e.target.value)})} className="w-full mb-2 p-2 border border-[#E2E8F0] outline-none" />
-              
-              <button 
-                type="button"
-                onClick={() => setIsSelectingLocation(true)}
-                className={`w-full py-2 mb-2 border text-xs font-medium ${newScanPos ? 'border-green-500 bg-green-50 text-green-700' : 'border-[#0F766E] text-[#0F766E] hover:bg-gray-100'}`}
-              >
-                {newScanPos ? '✓ Location Selected' : '📍 Select Location on Map'}
-              </button>
-
-              <div className="flex justify-between mt-2">
-                <button type="button" onClick={() => {setShowScanForm(false); setIsSelectingLocation(false); setNewScanPos(null);}} className="text-[#64748B] font-medium hover:text-[#0F172A]">Cancel</button>
-                <button type="submit" className="bg-[#0F766E] text-white px-3 py-1 font-medium">Add Scan</button>
-              </div>
-            </form>
-          ) : (
-            <button onClick={() => setShowScanForm(true)} className="w-full py-2 mt-auto text-xs font-medium border border-[#E2E8F0] text-[#0F172A] hover:bg-gray-50">
-              + Log New Scan
-            </button>
-          )}
-        </div>
+        <div className="flex-1"></div>
 
         {/* Generate Plan Button */}
         <div className="p-4 mt-auto">
@@ -261,20 +183,14 @@ export default function DriftHeatmap() {
       </div>
 
       {/* Right Map Panel */}
-      <div className={`flex-1 relative bg-blue-50 ${isSelectingLocation ? 'ring-4 ring-blue-400 ring-inset z-10' : ''}`}>
-        
-        {isSelectingLocation && (
-          <div className="absolute top-0 left-0 right-0 z-[500] bg-blue-100 border-b border-blue-200 text-blue-800 text-sm p-3 text-center font-medium shadow-md">
-            <span>ℹ️ Click on the map to set the scan center</span>
-          </div>
-        )}
+      <div className="flex-1 relative bg-blue-50">
 
         <MapContainer center={mapCenter} zoom={12} className="w-full h-full" zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://carto.com/attributions">CARTO</a>'
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           />
-          
+
           {/* LKP marker — prefer the position the simulation actually used */}
           {driftData?.lkp ? (
             <Marker position={[driftData.lkp.lat, driftData.lkp.lon]} icon={customIcon}>
@@ -282,42 +198,6 @@ export default function DriftHeatmap() {
             </Marker>
           ) : (incidentData.lat && incidentData.lng && (
             <Marker position={[parseFloat(incidentData.lat), parseFloat(incidentData.lng)]} icon={customIcon} />
-          ))}
-
-          {isSelectingLocation && (
-            <MapClickHandler onMapClick={(pos) => { setNewScanPos(pos); setIsSelectingLocation(false); }} />
-          )}
-
-          {/* New Scan Preview */}
-          {newScanPos && (
-            <>
-              <Marker 
-                position={[newScanPos.lat, newScanPos.lng]} 
-                draggable={true}
-                eventHandlers={{
-                  dragend(e) {
-                    setNewScanPos(e.target.getLatLng());
-                  }
-                }}
-              >
-                <Tooltip permanent direction="top" offset={[0, -20]} className="font-bold text-blue-600">Drag to adjust</Tooltip>
-              </Marker>
-              <Circle 
-                center={[newScanPos.lat, newScanPos.lng]} 
-                radius={newScan.radius} 
-                pathOptions={{ color: '#3b82f6', fillColor: '#93c5fd', fillOpacity: 0.5, weight: 2 }} 
-              />
-            </>
-          )}
-
-          {/* Scanned Areas */}
-          {showScanned && scannedAreas.map(area => (
-            <Circle 
-              key={`scan-${area.id}`}
-              center={area.center} 
-              radius={area.radius} 
-              pathOptions={{ color: '#22c55e', fillColor: '#86efac', fillOpacity: 0.3, weight: 1, dashArray: '4' }} 
-            />
           ))}
 
           {/* Realistic Heatmap */}
@@ -343,12 +223,6 @@ export default function DriftHeatmap() {
             className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showHeatmap ? 'bg-white border-[#0F766E] text-[#0F766E]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
           >
             Heatmap: {showHeatmap ? 'ON' : 'OFF'}
-          </button>
-          <button
-            onClick={() => setShowScanned(!showScanned)}
-            className={`px-3 py-1.5 text-xs font-semibold shadow-sm border ${showScanned ? 'bg-white border-[#22c55e] text-[#15803d]' : 'bg-gray-100 border-[#E2E8F0] text-[#64748B]'}`}
-          >
-            Scans: {showScanned ? 'ON' : 'OFF'}
           </button>
           <button
             onClick={() => setShowShore(!showShore)}

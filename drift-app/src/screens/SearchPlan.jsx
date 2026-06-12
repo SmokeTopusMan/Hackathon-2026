@@ -24,21 +24,6 @@ function HeatmapLayer({ points }) {
   return null;
 }
 
-// great-circle length of a poly-path, km
-function pathKm(waypoints) {
-  const R = 6371;
-  let km = 0;
-  for (let i = 1; i < waypoints.length; i++) {
-    const [la1, lo1] = waypoints[i - 1];
-    const [la2, lo2] = waypoints[i];
-    const dLa = (la2 - la1) * Math.PI / 180, dLo = (lo2 - lo1) * Math.PI / 180;
-    const a = Math.sin(dLa / 2) ** 2 +
-      Math.cos(la1 * Math.PI / 180) * Math.cos(la2 * Math.PI / 180) * Math.sin(dLo / 2) ** 2;
-    km += 2 * R * Math.asin(Math.sqrt(a));
-  }
-  return km;
-}
-
 // drop consecutive duplicate waypoints (an agent that "stays" repeats a cell)
 function dedupe(waypoints) {
   return waypoints.filter((p, i) => i === 0 ||
@@ -211,7 +196,6 @@ export default function SearchPlan() {
     : driftData?.lkp ? [driftData.lkp.lat, driftData.lkp.lon] : [32.82, 34.99];
 
   const teams = plan?.teams ?? [];
-  const totalKm = teams.reduce((s, t) => s + pathKm(t.waypoints), 0);
 
   // ---- animation: watch the teams sweep out from shore (algorithm running) --
   // anchor each track at the user's placed launch point (echoed by the backend
@@ -274,19 +258,12 @@ export default function SearchPlan() {
           </div>
           <input type="range" min="0" max={maxHour} step="1" value={currentHour}
             onChange={(e) => setCurrentHour(parseInt(e.target.value))}
-            className="w-full accent-[#0F766E] mb-4" />
+            className="w-full slider-grab mb-4" />
 
           <div className="space-y-2 text-sm">
-            <div className="flex justify-between"><span className="text-[#64748B]">Teams</span><span className="font-semibold">{plan ? plan.teams.length : '–'}</span></div>
-            <div className="flex justify-between"><span className="text-[#64748B]">Sonar radius</span><span className="font-semibold">{plan ? `${plan.sonar_radius_m} m` : '–'}</span></div>
-            <div className="flex justify-between"><span className="text-[#64748B]">Grid cell</span><span className="font-semibold">{plan ? `${plan.grid_m} m` : '–'}</span></div>
             <div className="flex justify-between"><span className="text-[#64748B]">Mission time</span><span className="font-semibold">{plan ? `${plan.mission_time_min} min` : '–'}</span></div>
             <div className="flex justify-between"><span className="text-[#64748B]">Converged</span><span className="font-semibold">{plan ? (plan.stop_reason || '–').replace('_', ' ') : '–'}</span></div>
           </div>
-          <p className="text-[11px] text-[#64748B] italic mt-3">
-            Runs until coverage converges (target {plan ? plan.coverage_target_pct : 95}%),
-            not a fixed step count. Team count / sonar from the simulation.
-          </p>
 
           {generating && (
             <div className="mt-4 flex items-center gap-2 text-sm text-[#0F766E]">
@@ -383,52 +360,6 @@ export default function SearchPlan() {
             <div className="bg-teal-50 border border-teal-200 p-4 mb-6">
               <p className="text-center font-bold text-teal-900 text-lg">
                 Probability cleared in {plan.mission_time_min} min: {plan.total_cleared_pct}%
-              </p>
-            </div>
-
-            <h3 className="font-semibold text-[#0F172A] mb-3">Team Assignments</h3>
-            <div className="border border-[#E2E8F0] bg-white text-sm mb-6">
-              <table className="w-full text-left">
-                <thead className="bg-gray-50 border-b border-[#E2E8F0]">
-                  <tr>
-                    <th className="p-2 font-medium text-[#64748B]">Craft</th>
-                    <th className="p-2 font-medium text-[#64748B]">Dist</th>
-                    <th className="p-2 font-medium text-[#64748B]">Time</th>
-                    <th className="p-2 font-medium text-[#64748B]">Cleared</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#E2E8F0]">
-                  {teams.map((t, i) => (
-                    <tr key={i}>
-                      <td className="p-2 flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.color }}></div>
-                        {t.team}{t.start_cell ? ` · ${t.start_cell}` : ''}
-                      </td>
-                      <td className="p-2">{t.distance_km ?? pathKm(t.waypoints).toFixed(1)} km</td>
-                      <td className="p-2">{t.time_min != null ? `${t.time_min} min` : '–'}</td>
-                      <td className="p-2">{t.cleared_pct}%</td>
-                    </tr>
-                  ))}
-                  <tr className="bg-gray-50 font-bold text-[#0F172A]">
-                    <td className="p-2">TOTAL</td>
-                    <td className="p-2">~{teams.reduce((s, t) => s + (t.distance_km ?? 0), 0).toFixed(1)} km</td>
-                    <td className="p-2">{plan.mission_time_min} min</td>
-                    <td className="p-2">{plan.total_cleared_pct}%</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div className="border border-[#E2E8F0] bg-white p-4">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#64748B]">AI Tactical Summary</span>
-              <p className="text-sm text-[#0F172A] leading-relaxed my-2">
-                {teams.length} teams launch from the nearest shore points and are dispersed by a
-                coordinated greedy planner (sonar {plan.sonar_radius_m} m, {plan.grid_m} m grid) over the
-                T+{plan.plan_hour}h probability field — clearing <b>{plan.total_cleared_pct}%</b> with no
-                overlapping sweeps. Re-plan at a later hour as the body drifts.
-              </p>
-              <p className="text-[10px] text-[#64748B] italic">
-                Generated by core/search_planner.py on the live drift heatmap
               </p>
             </div>
           </div>
